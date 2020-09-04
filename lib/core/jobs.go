@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+
 	"github.com/MG-RAST/AWE/lib/logger"
 	"gopkg.in/mgo.v2/bson"
 )

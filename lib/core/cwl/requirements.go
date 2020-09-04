@@ -4,21 +4,66 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+
 	//"github.com/MG-RAST/AWE/lib/logger"
 
+	"github.com/MG-RAST/AWE/lib/logger"
 	"github.com/davecgh/go-spew/spew"
 	//"github.com/mitchellh/mapstructure"
 )
 
+// Requirement _
 type Requirement interface {
+	CWLObject
 	GetClass() string
+	Evaluate(inputs interface{}, context *WorkflowContext) error
 }
 
+// DummyRequirement _
 type DummyRequirement struct {
 	BaseRequirement `bson:",inline" yaml:",inline" json:",inline" mapstructure:",squash"`
 }
 
-func NewRequirement(class string, obj interface{}) (r Requirement, schemata []CWLType_Type, err error) {
+// NewRequirementFromInterface _
+func NewRequirementFromInterface(obj interface{}, inputs interface{}, context *WorkflowContext) (r Requirement, err error) {
+
+	obj, err = MakeStringMap(obj, context)
+	if err != nil {
+		return
+	}
+
+	switch obj.(type) {
+	case map[string]interface{}:
+
+		var classStr string
+		classStr, err = GetClass(obj)
+		if err != nil {
+			err = fmt.Errorf("(NewRequirementFromInterface) GetClass returned: %s", err.Error())
+			return
+		}
+		//var schemata []CWLType_Type
+		r, err = NewRequirement(classStr, obj, inputs, context)
+		if err != nil {
+			err = fmt.Errorf("(NewRequirementFromInterface) NewRequirement retured: %s", err.Error())
+			return
+		}
+		return
+	}
+
+	var ok bool
+	r, ok = obj.(Requirement)
+	if ok {
+		return
+	}
+
+	err = fmt.Errorf("(NewRequirementFromInterface) type not recognized: %s", reflect.TypeOf(obj))
+
+	return
+
+}
+
+// NewRequirement _
+func NewRequirement(class string, obj interface{}, inputs interface{}, context *WorkflowContext) (r Requirement, err error) {
 
 	if class == "" {
 		err = fmt.Errorf("class name empty")
@@ -41,7 +86,7 @@ func NewRequirement(class string, obj interface{}) (r Requirement, schemata []CW
 		}
 		return
 	case "ResourceRequirement":
-		r, err = NewResourceRequirement(obj)
+		r, err = NewResourceRequirement(obj, inputs, context)
 		if err != nil {
 			err = fmt.Errorf("(NewRequirement) NewResourceRequirement returns: %s", err.Error())
 			return
@@ -55,7 +100,7 @@ func NewRequirement(class string, obj interface{}) (r Requirement, schemata []CW
 		}
 		return
 	case "EnvVarRequirement":
-		r, err = NewEnvVarRequirement(obj)
+		r, err = NewEnvVarRequirement(obj, context)
 		if err != nil {
 			err = fmt.Errorf("(NewRequirement) NewEnvVarRequirement returns: %s", err.Error())
 			return
@@ -76,7 +121,7 @@ func NewRequirement(class string, obj interface{}) (r Requirement, schemata []CW
 		}
 		return
 	case "InitialWorkDirRequirement":
-		r, err = NewInitialWorkDirRequirement(obj)
+		r, err = NewInitialWorkDirRequirement(obj, context)
 		if err != nil {
 			err = fmt.Errorf("(NewRequirement) NewInitialWorkDirRequirement returns: %s", err.Error())
 			return
@@ -97,7 +142,7 @@ func NewRequirement(class string, obj interface{}) (r Requirement, schemata []CW
 		}
 		return
 	case "SchemaDefRequirement":
-		r, schemata, err = NewSchemaDefRequirement(obj)
+		r, err = NewSchemaDefRequirement(obj, context)
 		if err != nil {
 			err = fmt.Errorf("(NewRequirement) NewSchemaDefRequirement returns: %s", err.Error())
 			return
@@ -105,9 +150,9 @@ func NewRequirement(class string, obj interface{}) (r Requirement, schemata []CW
 		return
 
 	case "SubworkflowFeatureRequirement":
-		this_r := DummyRequirement{}
-		this_r.Class = "SubworkflowFeatureRequirement"
-		r = this_r
+		thisR := DummyRequirement{}
+		thisR.Class = "SubworkflowFeatureRequirement"
+		r = &thisR
 	default:
 		err = errors.New("Requirement class not supported " + class)
 
@@ -115,96 +160,245 @@ func NewRequirement(class string, obj interface{}) (r Requirement, schemata []CW
 	return
 }
 
-func GetRequirement(r_name string, array_ptr *[]Requirement) (requirement *Requirement, err error) {
+// GetRequirement _
+func GetRequirement(rName string, arrayPtr []Requirement) (requirement *Requirement, err error) {
 
-	if array_ptr == nil {
-		err = fmt.Errorf("(GetRequirement) requirement array is empty, %s not found", r_name)
+	if arrayPtr == nil {
+		err = fmt.Errorf("(GetRequirement) requirement array is empty, %s not found", rName)
 		return
 	}
 
-	for i, _ := range *array_ptr {
+	for i := range arrayPtr {
 
-		if (*array_ptr)[i].GetClass() == r_name {
-			requirement = &(*array_ptr)[i]
+		if (arrayPtr)[i].GetClass() == rName {
+			requirement = &(arrayPtr)[i]
 			return
 		}
 	}
 	fmt.Println("Requirement array:")
-	spew.Dump(array_ptr)
-	err = fmt.Errorf("(GetRequirement) requirement %s not found", r_name)
+	spew.Dump(arrayPtr)
+	err = fmt.Errorf("(GetRequirement) requirement %s not found", rName)
 
 	return
 }
 
-func GetShockRequirement(array_ptr *[]Requirement) (shock_requirement *ShockRequirement, err error) {
-	var requirement_ptr *Requirement
-	requirement_ptr, err = GetRequirement("ShockRequirement", array_ptr)
+// GetShockRequirement _
+func GetShockRequirement(arrayPtr []Requirement) (shockRequirement *ShockRequirement, err error) {
+	var requirementPtr *Requirement
+	requirementPtr, err = GetRequirement("ShockRequirement", arrayPtr)
 	if err != nil {
 		return
 	}
 
-	requirement := *requirement_ptr
+	requirement := *requirementPtr
 
 	var ok bool
-	shock_requirement, ok = requirement.(*ShockRequirement)
+	shockRequirement, ok = requirement.(*ShockRequirement)
 	if !ok {
 		err = fmt.Errorf("(GetShockRequirement) could not convert ShockRequirement (type: %s)", reflect.TypeOf(requirement))
 		return
 	}
-	//shock_requirement = &shock_requirement_nptr
+	//shockRequirement = &shockRequirement_nptr
 
 	return
 }
 
-func AddRequirement(new_r Requirement, old_array_ptr *[]Requirement) (new_array_ptr *[]Requirement, err error) {
+// AddRequirement _
+func AddRequirement(newR Requirement, oldArrayPtr []Requirement) (newArrayPtr []Requirement, err error) {
 
-	var new_array []Requirement
+	var newArray []Requirement
 
-	new_r_class := new_r.GetClass()
-	if old_array_ptr != nil {
-		for i, _ := range *old_array_ptr {
-			r := (*old_array_ptr)[i]
-			if r.GetClass() == new_r_class {
-				new_array_ptr = old_array_ptr
+	newReqClass := newR.GetClass()
+	if oldArrayPtr != nil {
+		for i, _ := range oldArrayPtr {
+			r := (oldArrayPtr)[i]
+			if r.GetClass() == newReqClass {
+				newArrayPtr = oldArrayPtr
 				return
 			}
 		}
-		new_array = append(*old_array_ptr, new_r)
+		newArray = append(oldArrayPtr, newR)
 	} else {
-		new_array = []Requirement{new_r}
+		newArray = []Requirement{newR}
 	}
 
-	new_array_ptr = &new_array
+	newArrayPtr = newArray
 
 	return
 }
 
-func DeleteRequirement(requirement_class string, old_array_ptr *[]Requirement) (new_array_ptr *[]Requirement, err error) {
+// DeleteRequirement _
+func DeleteRequirement(requirementClass string, oldArrayPtr []Requirement) (newArrayPtr []Requirement, err error) {
 
 	// if old array is empty anyway, there is nothing to delete
-	if old_array_ptr == nil {
-		new_array_ptr = nil
+	if oldArrayPtr == nil {
+		newArrayPtr = nil
 		return
 	}
 
-	var new_array []Requirement
+	var newArray []Requirement
 
-	for i, _ := range *old_array_ptr {
-		r := (*old_array_ptr)[i]
-		if r.GetClass() != requirement_class {
-			new_array = append(new_array, r)
+	for i, _ := range oldArrayPtr {
+		r := (oldArrayPtr)[i]
+		if r.GetClass() != requirementClass {
+			newArray = append(newArray, r)
 		}
 	}
 
-	new_array_ptr = &new_array
+	newArrayPtr = newArray
 
 	return
 }
 
-func CreateRequirementArray(original interface{}) (new_array_ptr *[]Requirement, schemata []CWLType_Type, err error) {
+// , injectedRequirements []Requirement
+
+// CreateHintsArray _
+func CreateHintsArray(original interface{}, injectedRequirements []Requirement, inputs interface{}, context *WorkflowContext) (hintsArray []Requirement, err error) {
+	if original != nil {
+		hintsArray, err = CreateRequirementArray(original, true, inputs, context)
+		if err != nil {
+			err = fmt.Errorf("(CreateRequirementArrayAndInject) CreateRequirementArray returned: %s", err.Error())
+			return
+		}
+	}
+
+	// if a hint is also in injectedRequirements, do not keep it ! It is now a real Requirement, with possibly different values
+	if injectedRequirements != nil && hintsArray != nil {
+		filteredHints := []Requirement{}
+		for h := range hintsArray {
+
+			isInjected := false
+			for _, ir := range injectedRequirements {
+
+				irClass := ir.GetClass()
+				if hintsArray[h].GetClass() == irClass {
+					isInjected = true
+				}
+
+			}
+			if !isInjected {
+				filteredHints = append(filteredHints, hintsArray[h])
+			}
+		}
+		//	object["hints"] = new_hints
+		hintsArray = filteredHints
+	}
+
+	return
+}
+
+// CreateRequirementArrayAndInject Tools inherit Requirements, but should not overwrite !
+func CreateRequirementArrayAndInject(original interface{}, injectedRequirements []Requirement, inputs interface{}, context *WorkflowContext) (requirementsArray []Requirement, err error) {
+
+	if original != nil {
+		requirementsArray, err = CreateRequirementArray(original, false, inputs, context)
+		if err != nil {
+			err = fmt.Errorf("(CreateRequirementArrayAndInject) CreateRequirementArray returned: %s", err.Error())
+			return
+		}
+	}
+
+	logger.Debug(3, "(CreateRequirementArrayAndInject) requirementsArray: %d      injectedRequirements: %d", len(requirementsArray), len(injectedRequirements))
+
+	//fmt.Println("requirementsArray:")
+	//spew.Dump(requirementsArray)
+
+	if injectedRequirements == nil {
+		return
+	}
+
+	for _, ir := range injectedRequirements {
+
+		irClass := ir.GetClass()
+
+		found := false
+		for j := range requirementsArray {
+			currentRequirement := requirementsArray[j]
+			if currentRequirement.GetClass() == irClass {
+				found = true
+
+				// merge SchemaDefRequirement !
+				if irClass == "SchemaDefRequirement" {
+
+					existingSchemaDefRequirement := currentRequirement.(*SchemaDefRequirement)
+					injectedSchemaDefRequirement := ir.(*SchemaDefRequirement)
+
+					existingSchemaDefRequirementMap := make(map[string]bool)
+
+					for _, existingDefTypeIf := range existingSchemaDefRequirement.Types {
+
+						var existingDefTypeName string
+
+						switch existingDefTypeIf.(type) {
+						case *InputRecordSchema:
+							existingDefType := existingDefTypeIf.(*InputRecordSchema)
+							existingDefTypeName = existingDefType.GetName()
+						case *InputEnumSchema:
+							existingDefType := existingDefTypeIf.(*InputEnumSchema)
+							existingDefTypeName = existingDefType.Name
+						case *InputArraySchema:
+							// does not have a name , no way to compare here..
+							continue
+						default:
+							err = fmt.Errorf("(CreateRequirementArrayAndInject) type not expected: %s", reflect.TypeOf(existingDefTypeIf))
+							return
+						}
+
+						existingSchemaDefRequirementMap[existingDefTypeName] = true
+					}
+					// array<InputRecordSchema | InputEnumSchema | InputArraySchema>
+
+					// abstract InputSchema should have Get/SetName
+
+					for _, injectedDefTypeIf := range injectedSchemaDefRequirement.Types {
+						//injectedDefTypeIfNamed := injectedDefTypeIf.(NamedSchema)
+						//injectedDefTypeName := injectedDefTypeIfNamed.GetName()
+						foundDefType := false
+						var injectedDefTypeName string
+						switch injectedDefTypeIf.(type) {
+						case *InputRecordSchema:
+							injectedDefType := injectedDefTypeIf.(*InputRecordSchema)
+							injectedDefTypeName = injectedDefType.GetName()
+							_, foundDefType = existingSchemaDefRequirementMap[injectedDefTypeName]
+						case *InputEnumSchema:
+							injectedDefType := injectedDefTypeIf.(*InputEnumSchema)
+							injectedDefTypeName = injectedDefType.Name
+							_, foundDefType = existingSchemaDefRequirementMap[injectedDefTypeName]
+						case *InputArraySchema:
+							// does not have a name , no way to compare here..
+							continue
+						default:
+							err = fmt.Errorf("(CreateRequirementArrayAndInject) type not expected: %s", reflect.TypeOf(injectedDefTypeIf))
+							return
+						}
+
+						if !foundDefType { // injectedDefTypeIf was not found
+							// insert injectedDefTypeIf
+							existingSchemaDefRequirement.Types = append(existingSchemaDefRequirement.Types, injectedDefTypeIf)
+						}
+
+					}
+
+				}
+
+				break
+			}
+
+		}
+		if !found {
+			requirementsArray = append(requirementsArray, ir)
+		}
+
+	}
+
+	return
+}
+
+// CreateRequirementArray hints are optional, requirements are not
+func CreateRequirementArray(original interface{}, optional bool, inputs interface{}, context *WorkflowContext) (newArray []Requirement, err error) {
 	// here the keynames are actually class names
 
-	original, err = MakeStringMap(original)
+	original, err = MakeStringMap(original, context)
 	if err != nil {
 		return
 	}
@@ -212,61 +406,67 @@ func CreateRequirementArray(original interface{}) (new_array_ptr *[]Requirement,
 	if original == nil {
 		err = fmt.Errorf("(CreateRequirementArray) original == nil")
 	}
+	newArray = []Requirement{}
 
-	new_array := []Requirement{}
+	reqMap := make(map[string]bool)
 
 	switch original.(type) {
 	case map[string]interface{}:
-		for class_str, v := range original.(map[string]interface{}) {
 
-			var schemata_new []CWLType_Type
-			var requirement Requirement
-			requirement, schemata_new, err = NewRequirement(class_str, v)
-			if err != nil {
-				err = fmt.Errorf("(CreateRequirementArray) A NewRequirement returns: %s", err)
+		for classStr, v := range original.(map[string]interface{}) {
+
+			_, ok := reqMap[classStr]
+			if ok {
+				err = fmt.Errorf("(CreateRequirementArray) double entry: %s", classStr)
 				return
 			}
-			for i, _ := range schemata_new {
-				schemata = append(schemata, schemata_new[i])
+			reqMap[classStr] = true
+			//var schemataNew []CWLType_Type
+			var requirement Requirement
+			requirement, err = NewRequirement(classStr, v, inputs, context)
+			if err != nil {
+				if optional {
+					logger.Debug(1, "(CreateRequirementArray) A NewRequirement returns: %s", err.Error())
+					err = nil
+					continue
+				}
+				err = fmt.Errorf("(CreateRequirementArray) A NewRequirement returns: %s", err.Error())
+				return
 			}
+			//for i, _ := range schemataNew {
+			//	schemata = append(schemata, schemataNew[i])
+			//}
 
-			new_array = append(new_array, requirement)
+			newArray = append(newArray, requirement)
 		}
 	case []interface{}:
-		original_array := original.([]interface{})
+		originalArray := original.([]interface{})
 
-		for i, _ := range original_array {
-			v := original_array[i]
+		for i, _ := range originalArray {
+			v := originalArray[i]
 
-			var class_str string
-			class_str, err = GetClass(v)
-			if err != nil {
-				return
-			}
-
-			//class := CWLType_Type(class_str)
-			var schemata_new []CWLType_Type
 			var requirement Requirement
-			requirement, schemata_new, err = NewRequirement(class_str, v)
+			requirement, err = NewRequirementFromInterface(v, inputs, context)
 			if err != nil {
-				fmt.Println("CreateRequirementArray:")
-				spew.Dump(original)
-				fmt.Println("CreateRequirementArray done")
+				if optional {
+					logger.Debug(1, "(CreateRequirementArray) A NewRequirement returns: %s", err.Error())
+					err = nil
+					continue
+				}
+				//fmt.Println("CreateRequirementArray:")
+				//spew.Dump(original)
+				//fmt.Println("CreateRequirementArray done")
 				err = fmt.Errorf("(CreateRequirementArray) B NewRequirement returns: %s (%s)", err, spew.Sdump(v))
 				return
 			}
-			for i, _ := range schemata_new {
-				schemata = append(schemata, schemata_new[i])
-			}
-			new_array = append(new_array, requirement)
+
+			newArray = append(newArray, requirement)
 
 		}
 
 	default:
 		err = fmt.Errorf("(CreateRequirementArray) type %s unknown", reflect.TypeOf(original))
 	}
-
-	new_array_ptr = &new_array
 
 	return
 }

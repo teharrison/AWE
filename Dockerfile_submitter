@@ -3,7 +3,7 @@
 # docker build -t mgrast/awe-submitter -f Dockerfile_submitter .
 
 
-FROM golang:1.7.6-alpine
+FROM golang:1.12-alpine3.10
 
 # git needed for GIT_COMMIT_HASH
 RUN apk update && apk add git
@@ -23,7 +23,16 @@ RUN mkdir -p ${AWE} && \
   ./compile-submitter.sh
 
 # install cwl-runner with node.js
-RUN apk update ; apk add py-pip nodejs gcc python-dev musl-dev 
-RUN pip install --upgrade pip ; pip install cwl-runner
+RUN apk update ; apk add \
+  gcc \
+  git \
+  libxml2-dev \
+  libxslt-dev \
+  musl-dev \
+  nodejs \
+  python3-dev \
+  py3-libxml2 \
+  py3-pip \
+  py3-psutil   
 
-
+RUN pip3 install --upgrade pip ;  pip3 install lxml ; pip3 install cwl-runner

@@ -2,20 +2,22 @@ package cwl
 
 import (
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
-	"github.com/mitchellh/mapstructure"
 	"reflect"
 )
 
-// http://www.commonwl.org/v1.0/CommandLineTool.html#CommandInputArraySchema
+// CommandInputArraySchema http://www.commonwl.org/v1.0/CommandLineTool.html#CommandInputArraySchema
 type CommandInputArraySchema struct { // Items, Type , Label
-	ArraySchema  `yaml:",inline" json:",inline" bson:",inline" mapstructure:",squash"`
-	InputBinding *CommandLineBinding `yaml:"inputBinding,omitempty" bson:"inputBinding,omitempty" json:"inputBinding,omitempty"`
+	ArraySchema  `yaml:",inline" json:",inline" bson:",inline" mapstructure:",squash"` // Type, Label, Items
+	InputBinding *CommandLineBinding                                                   `yaml:"inputBinding,omitempty" bson:"inputBinding,omitempty" json:"inputBinding,omitempty"`
 }
 
+// Type2String _
 func (c *CommandInputArraySchema) Type2String() string { return "CommandInputArraySchema" }
-func (c *CommandInputArraySchema) GetId() string       { return "" }
 
+// GetID _
+func (c *CommandInputArraySchema) GetID() string { return "" }
+
+// NewCommandInputArraySchema _
 func NewCommandInputArraySchema() (coas *CommandInputArraySchema) {
 
 	coas = &CommandInputArraySchema{}
@@ -24,49 +26,43 @@ func NewCommandInputArraySchema() (coas *CommandInputArraySchema) {
 	return
 }
 
-func NewCommandInputArraySchemaFromInterface(original interface{}, schemata []CWLType_Type) (coas *CommandInputArraySchema, err error) {
+// NewCommandInputArraySchemaFromInterface _
+func NewCommandInputArraySchemaFromInterface(original interface{}, schemata []CWLType_Type, context *WorkflowContext) (coas *CommandInputArraySchema, err error) {
 
-	original, err = MakeStringMap(original)
+	original, err = MakeStringMap(original, context)
 	if err != nil {
 		return
 	}
 
-	coas = NewCommandInputArraySchema()
-
 	switch original.(type) {
 
 	case map[string]interface{}:
-		original_map, ok := original.(map[string]interface{})
+		originalMap, ok := original.(map[string]interface{})
 		if !ok {
 			err = fmt.Errorf("(NewCommandInputArraySchemaFromInterface) type error b")
 			return
 		}
 
-		items, ok := original_map["items"]
-		if ok {
-			var items_type []CWLType_Type
-
-			//fmt.Println("items: ")
-			//spew.Dump(items)
-
-			items_type, err = NewCWLType_TypeArray(items, schemata, "CommandInput", false)
-			if err != nil {
-				fmt.Println("a CommandInputArraySchema:")
-				spew.Dump(original)
-				err = fmt.Errorf("(NewCommandInputArraySchemaFromInterface) NewCWLType_TypeArray returns: %s", err.Error())
-				return
-			}
-			//fmt.Println("items_type: ")
-			//spew.Dump(items_type)
-			original_map["items"] = items_type
-
-		}
-
-		err = mapstructure.Decode(original, coas)
+		var as *ArraySchema
+		as, err = NewArraySchemaFromMap(originalMap, schemata, "CommandInput", context)
 		if err != nil {
-			err = fmt.Errorf("(NewCommandInputArraySchemaFromInterface) %s", err.Error())
+			err = fmt.Errorf("(NewCommandInputArraySchemaFromInterface) NewArraySchemaFromMap returned: %s", err.Error())
 			return
 		}
+
+		coas = &CommandInputArraySchema{}
+		coas.ArraySchema = *as
+
+		inputBinding, hasInputBinding := originalMap["inputBinding"]
+		if hasInputBinding {
+
+			coas.InputBinding, err = NewCommandLineBinding(inputBinding, context)
+			if err != nil {
+				err = fmt.Errorf("(NewOutputArraySchemaFromInterface) NewCommandOutputBinding returned: %s", err.Error())
+				return
+			}
+		}
+
 	default:
 		err = fmt.Errorf("NewCommandInputArraySchemaFromInterface, unknown type %s", reflect.TypeOf(original))
 	}

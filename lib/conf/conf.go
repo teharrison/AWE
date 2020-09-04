@@ -14,15 +14,20 @@ import (
 	"github.com/MG-RAST/golib/goconfig/config"
 )
 
-const VERSION string = "0.9.68"
+//const VERSION string = "0.9.70dev"
 
-var GIT_COMMIT_HASH string // use -ldflags "-X github.com/MG-RAST/AWE/lib/conf.GIT_COMMIT_HASH <value>"
+//var GIT_COMMIT_HASH string // use -ldflags "-X github.com/MG-RAST/AWE/lib/conf.GIT_COMMIT_HASH <value>"
+
+// command "git describe" is used to infer version number of AWE
+var VERSION string // use -ldflags "-X github.com/MG-RAST/AWE/lib/conf.VERSION <value>"
+
 const BasePriority int = 1
 
 const DB_COLL_JOBS string = "Jobs"
 const DB_COLL_PERF string = "Perf"
 const DB_COLL_CGS string = "ClientGroups"
 const DB_COLL_USERS string = "Users"
+const DB_COLL_SUBWORKFLOWS string = "SubWorkflows"
 
 //prefix for site login
 const LOGIN_PREFIX string = "go4711"
@@ -65,7 +70,7 @@ var (
 	RECOVER_MAX int
 
 	// AWE server port
-	SITE_PORT int
+	SITE_PORT int // deprecated
 	API_PORT  int
 	// AWE server external address
 	SITE_URL string
@@ -104,6 +109,7 @@ var (
 
 	// Directories
 	DATA_PATH     string
+	PREDATA_PATH  string
 	SITE_PATH     string
 	LOGS_PATH     string
 	AWF_PATH      string
@@ -167,16 +173,15 @@ var (
 	SHOCK_DOCKER_IMAGE_REPOSITORY string
 
 	// Other
-	ERROR_LENGTH         int
-	DEV_MODE             bool
-	DEBUG_LEVEL          int
-	CONFIG_FILE          string
-	LOG_OUTPUT           string
-	PRINT_HELP           bool // full usage
-	SHOW_HELP            bool // simple usage
-	SHOW_GIT_COMMIT_HASH bool
-	CPUPROFILE           string
-	MEMPROFILE           string
+	ERROR_LENGTH int
+	DEV_MODE     bool
+	DEBUG_LEVEL  int
+	CONFIG_FILE  string
+	LOG_OUTPUT   string
+	PRINT_HELP   bool // full usage
+	SHOW_HELP    bool // simple usage
+	CPUPROFILE   string
+	MEMPROFILE   string
 
 	// submitter (CWL)
 	SUBMITTER_OUTDIR         string
@@ -185,6 +190,10 @@ var (
 	SUBMITTER_OUTPUT         string
 	SUBMITTER_WAIT           bool
 	SUBMITTER_DOWNLOAD_FILES bool
+	SUBMITTER_SHOCK_AUTH     string
+	SUBMITTER_AWE_AUTH       string
+	SUBMITTER_UPLOAD_INPUT   bool
+	SUBMITTER_JOB_NAME       string
 
 	// WORKER (CWL)
 	CWL_RUNNER_ARGS string
@@ -229,7 +238,11 @@ type LoginResource struct {
 
 func get_my_config_string(c *config.Config, f *flag.FlagSet, val *Config_value_string) {
 	//overwrite variable if defined in config file
+	//fmt.Fprintf(os.Stderr, "val.Key: %s\n", val.Key)
+	//fmt.Fprintf(os.Stderr, "val.Default_value: %s\n", val.Default_value)
+
 	if c != nil {
+		// puts value from ini file in val.Target
 		getDefinedValueString(c, val.Section, val.Key, val.Target)
 	}
 	//overwrite variable if defined on command line (default values are overwritten by config file)
@@ -260,12 +273,12 @@ func getConfiguration(c *config.Config, mode string) (c_store *Config_store) {
 
 	if mode == "server" {
 		// Ports
-		c_store.AddInt(&SITE_PORT, 8081, "Ports", "site-port", "Internal port to run AWE Monitor on", "")
-		c_store.AddInt(&API_PORT, 8001, "Ports", "api-port", "Internal port for API", "")
+		c_store.AddInt(&SITE_PORT, 8081, "Ports", "site-port", "Internal port to run AWE Monitor on", "") // deprecated
+		c_store.AddInt(&API_PORT, 80, "Ports", "api-port", "Internal port for API", "")
 
 		// External
-		c_store.AddString(&SITE_URL, "http://localhost:8081", "External", "site-url", "External URL of AWE monitor, including port", "")
-		c_store.AddString(&API_URL, "http://localhost:8001", "External", "api-url", "External API URL of AWE server, including port", "")
+		c_store.AddString(&SITE_URL, "http://localhost:8081", "External", "site-url", "External URL of AWE monitor, including port", "") // deprecated
+		c_store.AddString(&API_URL, "http://localhost:80", "External", "api-url", "External API URL of AWE server, including port", "")
 
 		// SSL
 		c_store.AddBool(&SSL_ENABLED, false, "SSL", "enable", "", "")
@@ -328,8 +341,8 @@ func getConfiguration(c *config.Config, mode string) (c_store *Config_store) {
 		c_store.AddString(&GLOBAL_EXPIRE, "", "Server", "global_expire", "default number and unit of time after job completion before it expires", "")
 		c_store.AddString(&PIPELINE_EXPIRE, "", "Server", "pipeline_expire", "comma seperated list of pipeline_name=expire_days_unit, overrides global_expire", "")
 		c_store.AddBool(&PERF_LOG_WORKUNIT, false, "Server", "perf_log_workunit", "collecting performance log per workunit (not working)", "")
-		c_store.AddInt(&MAX_WORK_FAILURE, 3, "Server", "max_work_failure", "number of times that one workunit fails before the workunit considered suspend", "")
-		c_store.AddInt(&MAX_CLIENT_FAILURE, 5, "Server", "max_client_failure", "number of times that one client consecutively fails running workunits before the client considered suspend", "")
+		c_store.AddInt(&MAX_WORK_FAILURE, 1, "Server", "max_work_failure", "number of times that one workunit fails before the workunit considered suspend", "")
+		c_store.AddInt(&MAX_CLIENT_FAILURE, 0, "Server", "max_client_failure", "number of times that one client consecutively fails running workunits before the client considered suspend", "")
 		c_store.AddInt(&GOMAXPROCS, 0, "Server", "go_max_procs", "", "")
 		c_store.AddString(&RELOAD, "", "Server", "reload", "path or url to awe job data. WARNING this will drop all current jobs", "")
 		c_store.AddBool(&RECOVER, false, "Server", "recover", "load unfinished jobs from mongodb on startup", "")
@@ -340,6 +353,7 @@ func getConfiguration(c *config.Config, mode string) (c_store *Config_store) {
 		c_store.AddString(&SERVER_URL, "http://localhost:8001", "Client", "serverurl", "URL of AWE server, including API port", "")
 		c_store.AddString(&CWL_TOOL, "", "Client", "cwl_tool", "CWL CommandLineTool file", "")
 		c_store.AddString(&CWL_JOB, "", "Client", "cwl_job", "CWL job file", "")
+		c_store.AddString(&CLIENT_GROUP, "default", "Client", "group", "name of client group", "")
 	}
 
 	if mode == "worker" || mode == "submitter" {
@@ -353,13 +367,17 @@ func getConfiguration(c *config.Config, mode string) (c_store *Config_store) {
 		c_store.AddBool(&SUBMITTER_WAIT, false, "Client", "wait", "wait fopr job completion", "")
 		c_store.AddString(&SUBMITTER_OUTPUT, "", "Client", "output", "cwl output file", "")
 		c_store.AddBool(&SUBMITTER_DOWNLOAD_FILES, false, "Client", "download_files", "download output files from shock", "")
+		c_store.AddString(&SUBMITTER_SHOCK_AUTH, "", "Client", "shock_auth", "format: \"<bearer> <token>\"", "")
+		c_store.AddString(&SUBMITTER_AWE_AUTH, "", "Client", "awe_auth", "format: \"<bearer> <token>\"", "")
 
+		c_store.AddString(&SUBMITTER_JOB_NAME, "", "Client", "job_name", "name of job, default is filename", "")
+		c_store.AddBool(&SUBMITTER_UPLOAD_INPUT, false, "Client", "upload_input", "upload job input files into shock and return new job input structure", "")
+		//c_store.AddString(&SUBMITTER_AUTH_DATATOKEN, "", "Client", "shock_auth_bearer", "bearer for shock", "")
 	}
 
 	if mode == "worker" {
 		// Client/worker
 
-		c_store.AddString(&CLIENT_GROUP, "default", "Client", "group", "name of client group", "")
 		c_store.AddString(&CLIENT_NAME, "default", "Client", "name", "default determines client name by openstack meta data", "")
 		c_store.AddString(&CLIENT_HOSTNAME, "localhost", "Client", "hostname", "host name", "host name to help finding machines where the clients runs on")
 		c_store.AddString(&CLIENT_HOST_IP, "127.0.0.1", "Client", "host_ip", "ip address", "ip address to help finding machines where the clients runs on")
@@ -369,6 +387,8 @@ func getConfiguration(c *config.Config, mode string) (c_store *Config_store) {
 
 		c_store.AddString(&SUPPORTED_APPS, "", "Client", "supported_apps", "list of suported apps, comma separated", "")
 		c_store.AddString(&APP_PATH, "", "Client", "app_path", "the file path of supported app", "")
+
+		c_store.AddString(&PREDATA_PATH, "", "predata Directory", "predata", "a file path for storing predata, by default same as --data", "")
 
 		c_store.AddString(&WORK_PATH, "/mnt/data/awe/work", "Client", "workpath", "the root dir for workunit working dirs", "")
 		c_store.AddString(&METADATA, "", "Client", "metadata", "", "e.g. ec2, openstack...")
@@ -419,7 +439,7 @@ func getConfiguration(c *config.Config, mode string) (c_store *Config_store) {
 	}
 	c_store.AddInt(&DEBUG_LEVEL, 0, "Other", "debuglevel", "debug level: 0-3", "")
 	c_store.AddBool(&SHOW_VERSION, false, "Other", "version", "show version", "")
-	c_store.AddBool(&SHOW_GIT_COMMIT_HASH, false, "Other", "show_git_commit_hash", "", "")
+
 	c_store.AddBool(&PRINT_HELP, false, "Other", "fullhelp", "show detailed usage without \"--\"-prefixes", "")
 	c_store.AddBool(&SHOW_HELP, false, "Other", "help", "show usage", "")
 	c_store.AddString(&CPUPROFILE, "", "Other", "cpuprofile", "e.g. create cpuprofile.prof", "")
@@ -468,10 +488,6 @@ func Init_conf(mode string) (err error) {
 	}
 	if SHOW_VERSION {
 		PrintVersionMsg()
-		os.Exit(0)
-	}
-	if SHOW_GIT_COMMIT_HASH {
-		fmt.Fprintf(os.Stdout, "GIT_COMMIT_HASH=%s\n", GIT_COMMIT_HASH)
 		os.Exit(0)
 	}
 
@@ -571,6 +587,12 @@ func Init_conf(mode string) (err error) {
 
 	SITE_PATH = cleanPath(SITE_PATH)
 	DATA_PATH = cleanPath(DATA_PATH)
+	if PREDATA_PATH == "" {
+		PREDATA_PATH = DATA_PATH
+	} else {
+		PREDATA_PATH = cleanPath(PREDATA_PATH)
+	}
+
 	LOGS_PATH = cleanPath(LOGS_PATH)
 	WORK_PATH = cleanPath(WORK_PATH)
 	APP_PATH = cleanPath(APP_PATH)

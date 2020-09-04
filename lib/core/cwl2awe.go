@@ -11,6 +11,7 @@ import (
 	"github.com/MG-RAST/AWE/lib/logger"
 	"github.com/MG-RAST/AWE/lib/user"
 	"github.com/davecgh/go-spew/spew"
+
 	//aw_sequences"os"
 	"path"
 	//"reflect"
@@ -19,15 +20,16 @@ import (
 	"strings"
 )
 
+// Helper _
 type Helper struct {
-	unprocessed_ws *map[string]*cwl.WorkflowStep
-	processed_ws   *map[string]*cwl.WorkflowStep
-	collection     *cwl.CWL_collection
-	job            *Job
-	AWE_tasks      *map[string]*Task
+	unprocessedWS *map[string]*cwl.WorkflowStep
+	processedWS   *map[string]*cwl.WorkflowStep
+	//collection     *cwl.CWL_collection
+	job      *Job
+	AWETasks *map[string]*Task
 }
 
-func parseSourceString(source string, id string) (linked_step_name string, fieldname string, err error) {
+func parseSourceString(source string, id string) (linkedStepName string, fieldname string, err error) {
 
 	if !strings.HasPrefix(source, "#") {
 		err = fmt.Errorf("source has to start with # (%s)", id)
@@ -36,16 +38,16 @@ func parseSourceString(source string, id string) (linked_step_name string, field
 
 	source = strings.TrimPrefix(source, "#")
 
-	source_array := strings.Split(source, "/")
+	sourceArray := strings.Split(source, "/")
 
-	switch len(source_array) {
+	switch len(sourceArray) {
 	case 0:
 		err = fmt.Errorf("source empty (%s)", id)
 	case 1:
-		fieldname = source_array[0]
+		fieldname = sourceArray[0]
 	case 2:
-		linked_step_name = source_array[0]
-		fieldname = source_array[1]
+		linkedStepName = sourceArray[0]
+		fieldname = sourceArray[1]
 	default:
 		err = fmt.Errorf("source has too many fields (%s)", id)
 	}
@@ -53,151 +55,224 @@ func parseSourceString(source string, id string) (linked_step_name string, field
 	return
 }
 
-func CWL_input_check(job_input *cwl.Job_document, cwl_workflow *cwl.Workflow) (err error) {
+// CWLInputCheck _
+func CWLInputCheck(jobInput *cwl.Job_document, cwlWorkflow *cwl.Workflow, context *cwl.WorkflowContext) (jobInputNew *cwl.Job_document, err error) {
 
-	//job_input := *(collection.Job_input)
+	//jobInput := *(collection.Job_input)
 
-	job_input_map := job_input.GetMap() // map[string]CWLType
+	jobInputMap := jobInput.GetMap() // map[string]CWLType
 
-	for _, input := range cwl_workflow.Inputs {
+	for _, input := range cwlWorkflow.Inputs {
 		// input is a cwl.InputParameter object
 
 		//spew.Dump(input)
 
-		id := input.Id
-		logger.Debug(3, "(CWL_input_check) Parsing workflow input %s", id)
+		id := input.ID
+		logger.Debug(3, "(CWLInputCheck) Parsing workflow input %s", id)
 
-		id_base := path.Base(id)
-		expected_types := input.Type
+		idBase := path.Base(id)
 
-		if len(expected_types) == 0 {
-			err = fmt.Errorf("(CWL_input_check) (len(expected_types) == 0 ")
+		var expectedTypes []cwl.CWLType_Type
+		expectedTypes, err = input.GetTypes()
+		if err != nil {
+			err = fmt.Errorf("(CWLInputCheck) input.GetTypes returned: %s", err.Error())
+			return
+		}
+		// expectedTypesIf := input.Type
+
+		// switch expectedTypesIf.(type) {
+		// case []interface{}:
+		// 	expectedTypesArrayIf := expectedTypesIf.([]interface{})
+		// 	for _, tIf := range expectedTypesArrayIf {
+		// 		t, ok := tIf.(cwl.CWLType_Type)
+		// 		if !ok {
+		// 			err = fmt.Errorf("(CWLInputCheck) could not convert array element")
+		// 			return
+		// 		}
+		// 		expectedTypes = append(expectedTypes, t)
+		// 	}
+		// default:
+		// 	t, ok := expectedTypesIf.(cwl.CWLType_Type)
+		// 	if !ok {
+		// 		err = fmt.Errorf("(CWLInputCheck) could not convert expectedTypesIf element")
+		// 		return
+		// 	}
+		// 	expectedTypes = []cwl.CWLType_Type{t}
+		// }
+
+		if len(expectedTypes) == 0 {
+			err = fmt.Errorf("(CWLInputCheck) (len(expected_types) == 0 ")
 			return
 		}
 
-		// find workflow input in job_input_map
-		input_obj_ref, ok := job_input_map[id_base] // returns CWLType
+		// find workflow input in jobInputMap
+		inputObjRef, ok := jobInputMap[idBase] // returns CWLType
 		if !ok {
 			// not found, we can skip it it is optional anyway
 
 			if input.Default != nil {
-				logger.Debug(3, "input %s not found, replace with Default object", id_base)
-				input_obj_ref = input.Default
+				logger.Debug(3, "input %s not found, replace with Default object", idBase)
+				inputObjRef = input.Default
+
+				//input_obj_ref_file, ok := input_obj_ref.(*cwl.File)
+
+				jobInput = jobInput.Add(idBase, inputObjRef)
 			} else {
-				input_obj_ref = cwl.NewNull()
-				logger.Debug(3, "input %s not found, replace with Null object (no Default found)", id_base)
+				inputObjRef = cwl.NewNull()
+				logger.Debug(3, "input %s not found, replace with Null object (no Default found)", idBase)
 			}
 		}
 
-		if input_obj_ref == nil {
-			err = fmt.Errorf("(CWL_input_check) input_obj_ref == nil")
+		if inputObjRef == nil {
+			err = fmt.Errorf("(CWLInputCheck) input_obj_ref == nil")
 			return
 		}
 		// Get type of CWL_Type we found
-		input_type := input_obj_ref.GetType()
-		if input_type == nil {
+		inputType := inputObjRef.GetType()
+		if inputType == nil {
 
-			err = fmt.Errorf("(CWL_input_check) input_type == nil %s", spew.Sdump(input_obj_ref))
+			err = fmt.Errorf("(CWLInputCheck) input_type == nil %s", spew.Sdump(inputObjRef))
 			return
 		}
 		//input_type_str := "unknown"
-		logger.Debug(1, "(CWL_input_check) input_type: %s (%s)", input_type, input_type.Type2String())
+		logger.Debug(1, "(CWLInputCheck) input_type: %s (%s)", inputType, inputType.Type2String())
 
 		// Check if type of input we have matches one of the allowed types
-		has_type, xerr := cwl.TypeIsCorrect(expected_types, input_obj_ref)
+		hasType, xerr := cwl.TypeIsCorrect(expectedTypes, inputObjRef, context)
 		if xerr != nil {
-			err = fmt.Errorf("(CWL_input_check) (B) HasInputParameterType returns: %s", xerr.Error())
+			err = fmt.Errorf("(CWLInputCheck) (B) HasInputParameterType returns: %s", xerr.Error())
 
 			return
 		}
-		if !has_type {
-			//if strings.ToLower(obj_type) != strings.ToLower(expected_types) {
-			fmt.Printf("object found: ")
-			spew.Dump(input_obj_ref)
+		if !hasType {
 
-			//for _, elem := range *expected_types {
-			//	expected_types_str += "," + string(elem)
-			//}
-			//fmt.Printf("cwl_workflow.Inputs")
-			//spew.Dump(cwl_workflow.Inputs)
-			err = fmt.Errorf("(CWL_input_check) Input %s has type %s, but this does not match the expected types)", id, input_type)
-			return
+			if inputObjRef.GetType() == cwl.CWLNull && input.Default != nil {
+				// work-around to make sure ExpressionTool can use Default if it gets Null
+
+			} else {
+
+				//if strings.ToLower(obj_type) != strings.ToLower(expected_types) {
+				fmt.Printf("object found: ")
+				spew.Dump(inputObjRef)
+
+				expectedTypesStr := ""
+				for _, elem := range expectedTypes {
+					expectedTypesStr += "," + elem.Type2String()
+				}
+				//fmt.Printf("cwl_workflow.Inputs")
+				//spew.Dump(cwl_workflow.Inputs)
+				err = fmt.Errorf("(CWLInputCheck) Input %s has type %s, but this does not match the expected types(%s)", id, inputType, expectedTypesStr)
+				return
+			}
 		}
 
 	}
+
+	jobInputNew = jobInput
+
 	return
 }
 
-func CreateTasks(job *Job, workflow string, steps []cwl.WorkflowStep) (tasks []*Task, err error) {
-	tasks = []*Task{}
+// // CreateWorkflowTasks _
+// func CreateWorkflowTasksDEPRECATED(job *Job, namePrefix string, steps []cwl.WorkflowStep, stepPrefix string, parentID *Task_Unique_Identifier) (tasks []*Task, err error) {
+// 	tasks = []*Task{}
 
-	for s, _ := range steps {
+// 	if parentID == nil {
+// 		err = fmt.Errorf("(CreateWorkflowTasks) parent_id == nil")
+// 		return
+// 	}
 
-		step := steps[s] // I could not do "_, step := range", that leas to very strange behaviour ?!??!
+// 	entrypoint := job.Entrypoint
 
-		//task_name := strings.Map(
-		//	func(r rune) rune {
-		//		if syntax.IsWordChar(r) || r == '/' || r == '-' { // word char: [0-9A-Za-z_]
-		//			return r
-		//		}
-		//		return -1
-		//	},
-		//	step.Id)
+// 	if !strings.HasPrefix(namePrefix, entrypoint) {
+// 		err = fmt.Errorf("(CreateWorkflowTasks) prefix_name does not start with _entrypoint %s: %s", entrypoint, namePrefix)
+// 		return
+// 	}
 
-		if !strings.HasPrefix(step.Id, "#") {
-			err = fmt.Errorf("Workflow step name does not start with a #: %s", step.Id)
-			return
-		}
-		task_name := strings.TrimSuffix(step.Id, "/")
+// 	for s := range steps {
 
-		if task_name == "" {
-			err = fmt.Errorf("(CreateTasks) step_id is empty")
-			return
-		}
+// 		step := steps[s]
 
-		//task_name := strings.TrimPrefix(step.Id, "#main/")
-		//task_name = strings.TrimPrefix(task_name, "#")
-		var awe_task *Task
-		awe_task, err = NewTask(job, workflow, task_name)
-		if err != nil {
-			err = fmt.Errorf("(CreateTasks) NewTask returned: %s", err.Error())
-			return
-		}
+// 		if namePrefix == "" {
+// 			err = fmt.Errorf("(CreateWorkflowTasks) name_prefix empty")
+// 			return
+// 		}
 
-		awe_task.WorkflowStep = &step
-		//spew.Dump(step)
-		tasks = append(tasks, awe_task)
+// 		if !strings.HasPrefix(step.ID, "#") {
+// 			err = fmt.Errorf("(CreateWorkflowTasks) Workflow step name does not start with a #: %s", step.ID)
+// 			return
+// 		}
 
-	}
-	return
-}
+// 		fmt.Println("(CreateWorkflowTasks) step.Id: " + step.ID)
 
-func CWL2AWE(_user *user.User, files FormFiles, job_input *cwl.Job_document, cwl_workflow *cwl.Workflow, collection *cwl.CWL_collection) (job *Job, err error) {
+// 		// remove prefix
+// 		taskName := path.Base(step.ID)
+// 		//taskName := strings.TrimPrefix(step.Id, step_prefix)
+// 		//taskName = strings.TrimSuffix(taskName, "/")
+// 		//taskName = strings.TrimPrefix(taskName, "/")
 
-	//CommandLineTools := collection.CommandLineTools
+// 		//fmt.Println("(CreateWorkflowTasks) taskName: " + taskName)
+// 		//fmt.Println("(CreateWorkflowTasks) name_prefix: " + name_prefix)
+
+// 		fmt.Println("(CreateWorkflowTasks) new task name will be: " + namePrefix + " / " + taskName)
+
+// 		//taskName := strings.TrimPrefix(step.Id, #entrypoint/")
+// 		//taskName = strings.TrimPrefix(taskName, "#")
+
+// 		fmt.Printf("(CreateWorkflowTasks) creating task: %s %s\n", namePrefix, taskName)
+
+// 		var aweTask *Task
+// 		aweTask, err = NewTask(job, "DEPRECATED", namePrefix, taskName)
+// 		if err != nil {
+// 			err = fmt.Errorf("(CreateWorkflowTasks) NewTask returned: %s", err.Error())
+// 			return
+// 		}
+
+// 		//aweTask.WorkflowParent = parent_id
+
+// 		if step.ID == "" {
+// 			err = fmt.Errorf("(CreateWorkflowTasks) step.Id empty")
+// 			return
+// 		}
+
+// 		aweTask.WorkflowStep = &step
+// 		//spew.Dump(step)
+// 		tasks = append(tasks, aweTask)
+
+// 	}
+// 	return
+// }
+
+// CWL2AWE _
+func CWL2AWE(_user *user.User, files FormFiles, jobInput *cwl.Job_document, cwlWorkflow *cwl.Workflow, entrypoint string, context *cwl.WorkflowContext) (job *Job, err error) {
 
 	// check that all expected workflow inputs exist and that they have the correct type
-	logger.Debug(1, "CWL2AWE starting")
+	logger.Debug(1, "(CWL2AWE) CWL2AWE starting..")
+	defer logger.Debug(1, "(CWL2AWE) CWL2AWE leaving...")
 
-	err = CWL_input_check(job_input, cwl_workflow)
+	var jobInputNew *cwl.Job_document
+	jobInputNew, err = CWLInputCheck(jobInput, cwlWorkflow, context)
 	if err != nil {
-		err = fmt.Errorf("(CWL2AWE) CWL_input_check returned: %s", err.Error())
+		err = fmt.Errorf("(CWL2AWE) CWLInputCheck returned: %s", err.Error())
 		return
 	}
 
 	//os.Exit(0)
 	job = NewJob()
-	job.setId()
+
+	job.setID()
+
+	job.WorkflowContext = context
 	//job.CWL_workflow = cwl_workflow
 
-	logger.Debug(1, "Job created")
+	logger.Debug(1, "(CWL2AWE) Job created")
 
-	found_ShockRequirement := false
-	if cwl_workflow.Requirements != nil {
-		for _, r := range *cwl_workflow.Requirements { // TODO put ShockRequirement in Hints
+	foundShockRequirement := false
+	if cwlWorkflow.Requirements != nil {
+		for _, r := range cwlWorkflow.Requirements { // TODO put ShockRequirement in Hints
 			req, ok := r.(cwl.Requirement)
 			if !ok {
-				err = fmt.Errorf("not a requirement")
+				err = fmt.Errorf("(CWL2AWE) not a requirement")
 				return
 			}
 			switch req.GetClass() {
@@ -209,50 +284,75 @@ func CWL2AWE(_user *user.User, files FormFiles, job_input *cwl.Job_document, cwl
 				}
 
 				job.ShockHost = sr.Shock_api_url
-				found_ShockRequirement = true
+				foundShockRequirement = true
 
 			}
 		}
 	}
 
-	if !found_ShockRequirement {
-		err = fmt.Errorf("ShockRequirement has to be provided in the workflow object")
+	if !foundShockRequirement {
+		err = fmt.Errorf("(CWL2AWE) ShockRequirement has to be provided in the workflow object")
 		return
 		//job.ShockHost = "http://shock:7445" // TODO make this different
 
 	}
-	logger.Debug(1, "Requirements checked")
+	logger.Debug(1, "(CWL2AWE) Requirements checked")
 
 	// Once, job has been created, set job owner and add owner to all ACL's
-	job.Acl.SetOwner(_user.Uuid)
-	job.Acl.Set(_user.Uuid, acl.Rights{"read": true, "write": true, "delete": true})
+	job.ACL.SetOwner(_user.Uuid)
+	job.ACL.Set(_user.Uuid, acl.Rights{"read": true, "write": true, "delete": true})
 
+	logger.Debug(1, "(CWL2AWE) ACLs set")
 	// TODO first check that all resources are available: local files and remote links
 
-	main_wi := WorkflowInstance{Id: "::main::", Inputs: *job_input, RemainTasks: len(cwl_workflow.Steps)}
-	//new_wis := []WorkflowInstance{main_wi} // Not using AddWorkflowInstance to avoid mongo
-	job.WorkflowInstances = make([]interface{}, 1)
-	job.WorkflowInstances[0] = main_wi
+	// *** create WorkflowInstance
 
-	//if err != nil {
-	//	return
-	//}
-
-	var tasks []*Task
-	tasks, err = CreateTasks(job, "", cwl_workflow.Steps)
+	var wi *WorkflowInstance
+	wi, err = NewWorkflowInstance(entrypoint, job.ID, cwlWorkflow.ID, job, "") // Not using AddWorkflowInstance to avoid mongo
 	if err != nil {
+		err = fmt.Errorf("(CWL2AWE) NewWorkflowInstance returned: %s", err.Error())
 		return
 	}
 
-	job.Tasks = tasks
+	wi.Inputs = *jobInputNew
+	logger.Debug(1, "(CWL2AWE) WorkflowInstance %s created", entrypoint)
+
+	// create path
+	//for i, _ := range wi.Inputs {
+	//	new_id := cwl_workflow.Id + "/" + wi.Inputs[i].Id
+	//wi.Inputs[i].Id = new_id
+	//err = context.Add(new_id, wi.Inputs[i].Value, "CWL2AWE")
+	//if err != nil {
+	//	err = fmt.Errorf("(CWL2AWE) context.Add returned: %s", err.Error())
+	//	return
+	//}
+	//}
+
+	err = wi.Insert(false)
+	if err != nil {
+		err = fmt.Errorf("(CWL2AWE) wi.Save returned: %s", err.Error())
+		return
+	}
+
+	logger.Debug(1, "(CWL2AWE) wi saved")
+
+	err = job.AddWorkflowInstance(wi, DbSyncFalse, false) // adding _root
+	if err != nil {
+		err = fmt.Errorf("(CWL2AWE) AddWorkflowInstance returned: %s", err.Error())
+		return
+	}
+
+	job.Root = wi.ID
+
+	logger.Debug(1, "(CWL2AWE) wi added")
 
 	_, err = job.Init()
 
 	if err != nil {
-		err = fmt.Errorf("job.Init() failed: %s", err.Error())
+		err = fmt.Errorf("(CWL2AWE) job.Init() failed: %s", err.Error())
 		return
 	}
-	logger.Debug(1, "Init called")
+	logger.Debug(1, "(CWL2AWE) Init called")
 
 	err = job.Mkdir()
 	if err != nil {
@@ -262,16 +362,18 @@ func CWL2AWE(_user *user.User, files FormFiles, job_input *cwl.Job_document, cwl
 
 	err = job.UpdateFile(files, "cwl") // TODO that may not make sense. Check if I should store AWE job.
 	if err != nil {
-		err = errors.New("error in UpdateFile, error=" + err.Error())
+		err = errors.New("(CWL2AWE) error in UpdateFile, error=" + err.Error())
 		return
 	}
 
 	//spew.Dump(job)
 
-	logger.Debug(1, "job.Id: %s", job.Id)
+	//panic("done")
+
+	logger.Debug(1, "(CWL2AWE) job.Id: %s", job.ID)
 	err = job.Save()
 	if err != nil {
-		err = errors.New("error in job.Save(), error=" + err.Error())
+		err = errors.New("(CWL2AWE) error in job.Save(), error=" + err.Error())
 		return
 	}
 	return

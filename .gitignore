@@ -23,3 +23,16 @@ _testmain.go
 
 
 site/js/config.js
+.vscode/
+
+/data
+/tmp
+/Skyport2
+
+/deprecated
+
+/result.xml
+/testing/result.xml
+/testing/tmp
+/testing/data
+/site_deprecated/Retina

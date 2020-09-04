@@ -11,12 +11,15 @@ import (
 	"github.com/MG-RAST/AWE/lib/conf"
 	"github.com/MG-RAST/AWE/lib/core"
 	"github.com/MG-RAST/AWE/lib/core/cwl"
+	yaml "gopkg.in/yaml.v2"
+
 	//"github.com/MG-RAST/AWE/lib/core/cwl"
 	//cwl_types "github.com/MG-RAST/AWE/lib/core/cwl/types"
 	"github.com/MG-RAST/AWE/lib/logger"
 	"github.com/MG-RAST/AWE/lib/logger/event"
 	shock "github.com/MG-RAST/go-shock-client"
 	"github.com/MG-RAST/golib/httpclient"
+
 	//"github.com/davecgh/go-spew/spew"
 	"io"
 	"io/ioutil"
@@ -27,8 +30,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v2"
 )
 
 // this functions replaces filename if they match regular expression and they match the filename reported in IOmap
@@ -97,7 +98,7 @@ func prepareAppTask(parsed *Mediumwork, work *core.Workunit) (err error) {
 	//var cmd_interpreter = app_cmd_mode_object.Cmd_interpreter
 
 	//logger.Debug(1, fmt.Sprintf("cmd_interpreter: %s", cmd_interpreter))
-	var cmd_script = parsed.Workunit.Cmd.Cmd_script
+	var cmd_script = parsed.Workunit.Cmd.CmdScript
 
 	//if len(app_cmd_mode_object.Cmd_script) > 0 {
 	//	 parsed.Workunit.Cmd.Cmd_script = app_cmd_mode_object.Cmd_script
@@ -199,9 +200,13 @@ func downloadWorkunitData(workunit *core.Workunit) (err error) {
 		//make a working directory for the workunit (not for commandline execution !!!!!!)
 		err = workunit.Mkdir()
 		if err != nil {
-			logger.Error("[dataDownloader#workunit.Mkdir], workid=" + work_str + " error=" + err.Error())
-			workunit.Notes = append(workunit.Notes, "[dataDownloader#work.Mkdir]"+err.Error())
+			error_message := fmt.Sprintf("(dataDownloader) workunit.Mkdir, workid=%s workunit.Mkdir returned: %s", work_str, err.Error())
+			logger.Error(error_message)
+			workunit.Notes = append(workunit.Notes, error_message)
 			workunit.SetState(core.WORK_STAT_ERROR, "see notes")
+
+			core.Self.WorkerState.Healthy = false
+			core.Self.WorkerState.ErrorMessage = err.Error()
 			//hand the parsed workunit to next stage and continue to get new workunit to process
 			return
 		}
@@ -254,7 +259,7 @@ func downloadWorkunitData(workunit *core.Workunit) (err error) {
 		moved_data, xerr := cache.MoveInputData(workunit)
 		if xerr != nil {
 
-			err = fmt.Errorf("(downloadWorkunitData) workid=%s error=%s", work_str, xerr.Error())
+			err = fmt.Errorf("(downloadWorkunitData) workid=%s , cache.MoveInputData returned: %s", work_str, xerr.Error())
 			workunit.Notes = append(workunit.Notes, "[dataDownloader#MoveInputData]"+err.Error())
 			workunit.SetState(core.WORK_STAT_ERROR, "see notes")
 			//hand the parsed workunit to next stage and continue to get new workunit to process
@@ -265,10 +270,10 @@ func downloadWorkunitData(workunit *core.Workunit) (err error) {
 			workunit.WorkPerf.DataIn = float64(datamove_end-datamove_start) / 1e9
 		}
 
-		if workunit.CWL_workunit != nil {
+		if workunit.CWLWorkunit != nil {
 
-			job_input := workunit.CWL_workunit.Job_input
-			cwl_tool := workunit.CWL_workunit.Tool
+			job_input := workunit.CWLWorkunit.JobInput
+			cwl_tool := workunit.CWLWorkunit.Tool
 			job_input_filename := path.Join(work_path, "cwl_job_input.yaml")
 			cwl_tool_filename := path.Join(work_path, "cwl_tool.yaml")
 
@@ -294,6 +299,7 @@ func downloadWorkunitData(workunit *core.Workunit) (err error) {
 					err = fmt.Errorf("(downloadWorkunitData) DeleteRequirement/CommandLineTool returned: %s", err.Error())
 					return
 				}
+				cwl_tool_clt.ID = ""
 				cwl_tool_bytes, err = yaml.Marshal(cwl_tool_clt)
 				if err != nil {
 					return
@@ -305,6 +311,7 @@ func downloadWorkunitData(workunit *core.Workunit) (err error) {
 					err = fmt.Errorf("(downloadWorkunitData) DeleteRequirement/ExpressionTool returned: %s", err.Error())
 					return
 				}
+				cwl_tool_et.ID = ""
 				cwl_tool_bytes, err = yaml.Marshal(cwl_tool_et)
 				if err != nil {
 					return
@@ -328,6 +335,8 @@ func downloadWorkunitData(workunit *core.Workunit) (err error) {
 			if err != nil {
 				return
 			}
+
+			//cwl_tool_bytes = bytes.Replace(cwl_tool_bytes, []byte("namespaces"), []byte("$namespaces"), 1)
 
 			err = ioutil.WriteFile(cwl_tool_filename, cwl_tool_bytes, 0644)
 			if err != nil {
@@ -363,8 +372,8 @@ func downloadWorkunitData(workunit *core.Workunit) (err error) {
 
 func dataDownloader(control chan int) {
 	//var err error
-	fmt.Printf("dataDownloader launched, client=%s\n", core.Self.Id)
-	logger.Debug(1, "dataDownloader launched, client=%s\n", core.Self.Id)
+	fmt.Printf("dataDownloader launched, client=%s\n", core.Self.ID)
+	logger.Debug(1, "dataDownloader launched, client=%s\n", core.Self.ID)
 
 	defer fmt.Printf("dataDownloader exiting...\n")
 	for {
@@ -390,11 +399,12 @@ func dataDownloader(control chan int) {
 		//panic("done")
 		fromMover <- workunit
 	}
-	control <- ID_DATADOWNLOADER //we are ending
+	//control <- ID_DATADOWNLOADER //we are ending
+
 }
 
 func proxyDataMover(control chan int) {
-	fmt.Printf("proxyDataMover launched, client=%s\n", core.Self.Id)
+	fmt.Printf("proxyDataMover launched, client=%s\n", core.Self.ID)
 	defer fmt.Printf("proxyDataMover exiting...\n")
 
 	for {
@@ -415,7 +425,7 @@ func proxyDataMover(control chan int) {
 		}
 		fromMover <- workunit
 	}
-	control <- ID_DATADOWNLOADER
+	//control <- ID_DATADOWNLOADER
 }
 
 //parse workunit, fetch input data, compose command arguments
@@ -539,7 +549,7 @@ func fetchFile_old(filename string, url string, token string) (size int64, err e
 func movePreData(workunit *core.Workunit) (size int64, err error) {
 	for _, io := range workunit.Predata {
 		name := io.FileName
-		predata_directory := path.Join(conf.DATA_PATH, "predata")
+		predata_directory := path.Join(conf.PREDATA_PATH, "predata")
 		err = os.MkdirAll(predata_directory, 755)
 		if err != nil {
 			err = errors.New("error creating predata_directory: " + err.Error())
@@ -571,7 +581,7 @@ func movePreData(workunit *core.Workunit) (size int64, err error) {
 		// file does not exist or its md5sum is wrong
 		if !isFileExisting(file_path) {
 			logger.Debug(2, "mover: fetching predata from url: "+dataUrl)
-			logger.Event(event.PRE_IN, "workid="+workunit.Id+" url="+dataUrl)
+			logger.Event(event.PRE_IN, "workid="+workunit.ID+" url="+dataUrl)
 
 			var md5sum string
 			file_path_part := file_path + ".part" // temporary name
@@ -653,7 +663,7 @@ func movePreData(workunit *core.Workunit) (size int64, err error) {
 			}
 		}
 
-		logger.Event(event.PRE_READY, "workid="+workunit.Id+";url="+dataUrl)
+		logger.Event(event.PRE_READY, "workid="+workunit.ID+";url="+dataUrl)
 	}
 	return
 }

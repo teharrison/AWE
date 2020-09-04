@@ -1,12 +1,12 @@
 package core
 
-import (
+import rwmutex "github.com/MG-RAST/go-rwmutex"
+
 //"fmt"
 //"github.com/MG-RAST/AWE/lib/logger"
-)
 
 type WorkunitMap struct {
-	RWMutex
+	rwmutex.RWMutex
 	Map map[Workunit_Unique_Identifier]*Workunit
 }
 

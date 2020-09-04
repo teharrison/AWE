@@ -2,6 +2,8 @@ package cwl
 
 import (
 	"fmt"
+
+	"github.com/davecgh/go-spew/spew"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -12,19 +14,22 @@ type EnumSchema struct {
 	Name    string   `yaml:"name,omitempty" bson:"name,omitempty" json:"name,omitempty" mapstructure:"name,omitempty"`
 }
 
-func (s EnumSchema) GetId() string       { return s.Name }
+func (s EnumSchema) GetID() string       { return s.Name }
 func (s EnumSchema) Is_Type()            {}
 func (s EnumSchema) Type2String() string { return "EnumSchema" }
 
-func NewEnumSchemaFromInterface(original interface{}) (es EnumSchema, err error) {
+func NewEnumSchemaFromInterface(original interface{}, context *WorkflowContext) (es EnumSchema, err error) {
 
-	original, err = MakeStringMap(original)
+	original, err = MakeStringMap(original, context)
 	if err != nil {
 		return
 	}
 
 	err = mapstructure.Decode(original, &es)
 	if err != nil {
+		fmt.Println("(NewEnumSchemaFromInterface) original:")
+		spew.Dump(original)
+
 		err = fmt.Errorf("(NewEnumSchemaFromInterface) mapstructure returned: %s", err.Error())
 		return
 	}

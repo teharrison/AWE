@@ -8,18 +8,16 @@ import (
 	"github.com/MG-RAST/AWE/lib/core"
 	"github.com/MG-RAST/AWE/lib/core/cwl"
 	"github.com/MG-RAST/AWE/lib/logger"
-	"github.com/MG-RAST/AWE/lib/shock"
-	"github.com/davecgh/go-spew/spew"
+	shock "github.com/MG-RAST/go-shock-client"
+
 	//"github.com/MG-RAST/AWE/lib/logger/event"
-	"bytes"
+
 	"encoding/json"
 
 	"github.com/MG-RAST/AWE/lib/cache"
 	//"github.com/davecgh/go-spew/spew"
-	"io"
+
 	"io/ioutil"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -36,9 +34,9 @@ type standardResponse struct {
 }
 
 func main() {
-	err := main_wrapper()
+	err := mainWrapper()
 	if err != nil {
-		fmt.Printf("\nerror: %s\n\n", err.Error())
+		fmt.Fprintf(os.Stderr, "\nerror: %s\n\n", err.Error())
 		time.Sleep(time.Second)
 		os.Exit(1)
 	}
@@ -46,7 +44,7 @@ func main() {
 	os.Exit(0)
 }
 
-func main_wrapper() (err error) {
+func mainWrapper() (err error) {
 
 	conf.LOG_OUTPUT = "console"
 
@@ -59,12 +57,12 @@ func main_wrapper() (err error) {
 
 	logger.Initialize("client")
 
-	awe_auth := os.Getenv("AWE_AUTH")
-	shock_auth := os.Getenv("SHOCK_AUTH")
+	aweAuth := conf.SUBMITTER_AWE_AUTH
+	shockAuth := conf.SUBMITTER_SHOCK_AUTH
 
-	if awe_auth != "" {
-		awe_auth_array := strings.SplitN(awe_auth, " ", 2)
-		if len(awe_auth_array) != 2 {
+	if aweAuth != "" {
+		aweAuthArray := strings.SplitN(aweAuth, " ", 2)
+		if len(aweAuthArray) != 2 {
 			err = fmt.Errorf("error parsing AWE_AUTH (expected format \"bearer token\")")
 			return
 		}
@@ -80,121 +78,297 @@ func main_wrapper() (err error) {
 	//	println(value)
 	//}
 
-	if len(conf.ARGS) < 2 {
-		err = fmt.Errorf("not enough arguments, workflow file and job file are required")
+	jobFile := ""
+
+	if conf.SUBMITTER_UPLOAD_INPUT {
+		jobFile = conf.ARGS[0]
+
+		inputfilePath := path.Dir(jobFile)
+
+		var jobDoc *cwl.Job_document
+
+		jobDoc, err = cwl.ParseJobFile(jobFile)
+		if err != nil {
+			err = fmt.Errorf("error parsing cwl job: %s", err.Error())
+			return
+		}
+
+		shockClient := shock.NewShockClient(conf.SHOCK_URL, shockAuth, false)
+		shockClient.Debug = true
+		var uploadCount int
+		//var jobData []byte
+
+		uploadCount, err = cache.ProcessIOData(jobDoc, inputfilePath, inputfilePath, "upload", shockClient, nil, true, false)
+		if err != nil {
+			err = fmt.Errorf("(mainWrapper) ProcessIOData(for upload) returned: %s", err.Error())
+			return
+		}
+
+		logger.Debug(3, "%d files have been uploaded\n", uploadCount)
+		//time.Sleep(2)
+
+		//spew.Dump(*job_doc)
+		jobDocMap := jobDoc.GetMap()
+
+		var jobData []byte
+		jobData, err = yaml.Marshal(jobDocMap)
+		if err != nil {
+			return
+		}
+
+		fmt.Printf("%s", jobData)
+
 		return
 	}
 
-	workflow_file := conf.ARGS[0]
-	job_file := conf.ARGS[1]
+	var workflowTemporaryFile string
+	var entrypoint string
 
-	inputfile_path := path.Dir(job_file)
-	//fmt.Printf("job path: %s\n", inputfile_path) // needed to resolve relative paths
+	var workflowFile string
 
-	// ### parse job file
-	var job_doc *cwl.Job_document
-	job_doc, err = cwl.ParseJobFile(job_file)
+	//fmt.Printf("conf.ARGS: %d\n", conf.ARGS)
+
+	if len(conf.ARGS) >= 1 {
+		args0Array := strings.Split(conf.ARGS[0], "#")
+		workflowFile = args0Array[0]
+		if len(args0Array) > 1 {
+			entrypoint = "#" + args0Array[1]
+		}
+	}
+
+	if len(conf.ARGS) >= 2 {
+
+		jobFile = conf.ARGS[1]
+
+		// fmt.Printf("conf.ARGS[0]: %s\n", conf.ARGS[0])
+		// fmt.Printf("conf.ARGS[1]: %s\n", conf.ARGS[1])
+		// fmt.Printf("jobFile: %s\n", jobFile)
+		// fmt.Printf("entrypoint: %s\n", entrypoint)
+
+	}
+	logger.Debug(3, "(main_wrapper) A entrypoint: %s", entrypoint)
+	//fmt.Printf("---------- A\n")
+
+	context := cwl.NewWorkflowContext()
+	context.Init(entrypoint)
+
+	var jobData []byte
+	var newEntrypoint string // name of Workflow in single document for example
+	workflowTemporaryFile, jobData, newEntrypoint, err = createNormalizedSubmisson(aweAuth, shockAuth, workflowFile, jobFile, entrypoint, context)
 	if err != nil {
-		err = fmt.Errorf("error parsing cwl job: %s", err.Error())
+		err = fmt.Errorf("(mainWrapper) createNormalizedSubmisson returned: %s", err.Error())
 		return
 	}
 
+	if newEntrypoint != "" {
+		entrypoint = newEntrypoint
+	}
+	logger.Debug(3, "(main_wrapper) B entrypoint: %s", entrypoint)
+	//fmt.Printf("---------- B\n")
+	// ### Submit job to AWE
+	var jobid string
+
+	// single tools are wrapped into a workflow, thus returns new entrypoint
+	jobid, newEntrypoint, err = SubmitCWLJobToAWE(workflowTemporaryFile, jobFile, entrypoint, &jobData, aweAuth, shockAuth)
+	if err != nil {
+		err = fmt.Errorf("(main_wrapper) SubmitCWLJobToAWE returned: %s", err.Error())
+		return
+	}
+
+	if newEntrypoint != "" {
+		entrypoint = newEntrypoint
+	}
+	logger.Debug(3, "(main_wrapper) C entrypoint: %s", entrypoint)
+	// if strings.HasPrefix(entrypoint, "#") {
+	// 	entrypoint = strings.TrimPrefix(entrypoint, "#")
+	// }
+	//fmt.Printf("---------- C\n")
+	//fmt.Printf("Job id: %s\n", jobid)
+
+	if conf.SUBMITTER_WAIT {
+		err = WaitForResults(jobid, entrypoint, aweAuth, context)
+		if err != nil {
+			err = fmt.Errorf("(main_wrapper) Wait_for_results returned: %s", err.Error())
+			return
+		}
+	} else {
+		fmt.Printf("JobID=%s\n", jobid)
+	}
+
+	return
+}
+
+func createNormalizedSubmisson(aweAuth string, shockAuth string, workflowFile string, jobFile string, entrypoint string, context *cwl.WorkflowContext) (workflowTemporaryFile string, jobData []byte, newEntrypoint string, err error) {
+
+	//workflowFile := conf.ARGS[0]
+
+	if workflowFile == "" {
+		err = fmt.Errorf("(createNormalizedSubmisson) workflowFile empty")
+		return
+	}
+
+	inputfilePath := ""
+	//workflowFileBase := path.Base(workflowFile)
+	//fmt.Printf("job path: %s\n", inputfile_path) // needed to resolve relative paths
+	//fmt.Printf("createNormalizedSubmisson A\n")
+	// ### parse job file
+	var jobDoc *cwl.Job_document
+
+	if jobFile != "" {
+
+		inputfilePath = path.Dir(jobFile)
+		//inputFileBase = path.Base(jobFile)
+		jobDoc, err = cwl.ParseJobFile(jobFile)
+		if err != nil {
+			err = fmt.Errorf("error parsing cwl job: %s", err.Error())
+			return
+		}
+	} else {
+		jobDoc = &cwl.Job_document{}
+		inputfilePath = path.Dir(workflowFile)
+
+	}
 	//fmt.Println("Job input after reading from file:")
 	//spew.Dump(*job_doc)
 
-	job_doc_map := job_doc.GetMap()
+	var jobDocMap cwl.JobDocMap
+	//fmt.Printf("createNormalizedSubmisson B\n")
 	//job_doc_map["test"] = cwl.NewNull()
 
-	//fmt.Println("Job input after reading from file: map !!!!\n")
-	//spew.Dump(job_doc_map)
+	// if conf.DEBUG_LEVEL >= 3 {
+	// 	fmt.Println("Job input after reading from file: map !!!!\n")
+	// 	spew.Dump(jobDocMap)
+	// }
+	//var jobData []byte
 
-	var data []byte
-	data, err = yaml.Marshal(job_doc_map)
-	if err != nil {
-		return
+	if conf.DEBUG_LEVEL >= 3 {
+		fmt.Printf("jobFile: \"%s\"\n", jobFile)
+
+		jobDocMap = jobDoc.GetMap()
+		jobData, err = yaml.Marshal(jobDocMap)
+		if err != nil {
+			return
+		}
+
+		jobDocString := string(jobData[:])
+		fmt.Printf("job_doc_string:\n \"%s\"\n", jobDocString)
+
+		fmt.Printf("yaml:\n%s\n", jobDocString)
 	}
 
-	job_doc_string := string(data[:])
-	//fmt.Printf("job_doc_string:\n \"%s\"\n", job_doc_string)
-	if job_doc_string == "" {
-		err = fmt.Errorf("job_doc_string is empty")
-		return
+	// ### upload input files
+
+	shockClient := shock.NewShockClient(conf.SHOCK_URL, shockAuth, false)
+	//fmt.Printf("createNormalizedSubmisson C\n")
+	uploadCount := 0
+
+	if jobFile != "" {
+		uploadCount, err = cache.ProcessIOData(jobDoc, inputfilePath, inputfilePath, "upload", shockClient, context, true, false)
+		if err != nil {
+			err = fmt.Errorf("(createNormalizedSubmisson) A) ProcessIOData(for upload) returned: %s", err.Error())
+			return
+		}
 	}
-	//os.Exit(0)
-	//fmt.Printf("yaml:\n%s\n", job_doc_string)
-
-	// ### process input files
-
-	shock_client := shock.NewShockClient(conf.SHOCK_URL, shock_auth, false)
-
-	var upload_count int
-	upload_count, err = cache.ProcessIOData(job_doc, inputfile_path, "upload", shock_client)
-	if err != nil {
-		err = fmt.Errorf("(main_wrapper) ProcessIOData(for upload) returned: %s", err.Error())
-		return
-	}
-	logger.Debug(3, "%d files have been uploaded\n", upload_count)
-	time.Sleep(2)
+	logger.Debug(3, "%d files have been uploaded\n", uploadCount)
+	//time.Sleep(2)
 
 	//spew.Dump(*job_doc)
-	job_doc_map = job_doc.GetMap()
+	jobDocMap = jobDoc.GetMap()
 	//fmt.Println("------------Job input after parsing:")
-	data, err = yaml.Marshal(job_doc_map)
+	jobData, err = yaml.Marshal(jobDocMap)
 	if err != nil {
 		return
 	}
-
-	//fmt.Printf("yaml:\n%s\n", string(data[:]))
-
+	//fmt.Printf("createNormalizedSubmisson D\n")
+	if conf.DEBUG_LEVEL >= 3 {
+		fmt.Printf("job input as yaml:\n%s\n", string(jobData[:]))
+	}
 	var yamlstream []byte
 	// read and pack workfow
 	if conf.SUBMITTER_PACK {
 
-		yamlstream, err = exec.Command("cwltool", "--pack", workflow_file).Output()
+		yamlstream, err = exec.Command("cwltool", "--pack", workflowFile).Output()
 		if err != nil {
-			err = fmt.Errorf("(main_wrapper) exec.Command returned: %s (%s %s %s)", err.Error(), "cwltool", "--pack", workflow_file)
+			err = fmt.Errorf("(createNormalizedSubmisson) exec.Command returned: %s (%s %s %s)", err.Error(), "cwltool", "--pack", workflowFile)
 			return
 		}
 
 	} else {
 
-		yamlstream, err = ioutil.ReadFile(workflow_file)
+		yamlstream, err = ioutil.ReadFile(workflowFile)
 		if err != nil {
-			err = fmt.Errorf("error in reading workflow file: " + err.Error())
+			err = fmt.Errorf("(createNormalizedSubmisson) error in reading workflow file %s: %s", workflowFile, err.Error())
 			return
 		}
 	}
-	// ### PARSE WORKFLOW DOCUMENT, in case default files have to be uploaded
+	// ### PARSE (maybe PACKED) WORKFLOW DOCUMENT, in case default files have to be uploaded
 
 	// convert CWL to string
-	yaml_str := string(yamlstream[:])
-	fmt.Printf("after cwltool --pack: \n%s\n", yaml_str)
-	var named_object_array cwl.Named_CWL_object_array
-	var cwl_version cwl.CWLVersion
+	yamlStr := string(yamlstream[:])
+	//fmt.Printf("after cwltool --pack: \n%s\n", yaml_str)
+	var namedObjectArray []cwl.NamedCWLObject
+	//var cwl_version cwl.CWLVersion
 	var schemata []cwl.CWLType_Type
-	named_object_array, cwl_version, schemata, err = cwl.Parse_cwl_document(yaml_str)
+	//var namespaces map[string]string
+	//var schemas []interface{}
+	//var context *cwl.WorkflowContext
+	//fmt.Printf("createNormalizedSubmisson E\n")
+	//var newEntrypoint string
+	namedObjectArray, schemata, context, _, newEntrypoint, err = cwl.ParseCWLDocument(nil, yamlStr, entrypoint, inputfilePath, "#"+workflowFile)
 
+	// if newEntrypoint != "" {
+	// 	entrypoint = newEntrypoint
+	// }
+
+	//fmt.Printf("createNormalizedSubmisson F\n")
 	if err != nil {
-		err = fmt.Errorf("(main_wrapper) error in parsing cwl workflow yaml file: " + err.Error())
+		if conf.SUBMITTER_PACK {
+			err = fmt.Errorf("(createNormalizedSubmisson) error in parsing output of \"cwltool --pack %s\" (%s)", workflowFile, err.Error())
+		} else {
+			err = fmt.Errorf("(createNormalizedSubmisson) error in parsing file %s: %s", workflowFile, err.Error())
+		}
 		return
 	}
 
 	_ = schemata // TODO put into a collection!
 
-	var shock_requirement cwl.ShockRequirement
-	var shock_requirement_ptr *cwl.ShockRequirement
-	shock_requirement_ptr, err = cwl.NewShockRequirement(shock_client.Host)
+	// A) search for File objects in Document, e.g. in CommandLineTools
+
+	subUploadCount := 0
+	subUploadCount, err = cache.ProcessIOData(namedObjectArray, inputfilePath, inputfilePath, "upload", shockClient, context, true, false)
 	if err != nil {
-		err = fmt.Errorf("(main_wrapper) NewShockRequirement returned: %s", err.Error())
+		err = fmt.Errorf("(createNormalizedSubmisson) B) ProcessIOData(for upload) returned: %s", err.Error())
+		return
+	}
+	uploadCount += subUploadCount
+	//fmt.Printf("createNormalizedSubmisson G\n")
+	if context.Schemas != nil {
+		subUploadCount := 0
+		subUploadCount, err = cache.ProcessIOData(context.Schemas, inputfilePath, inputfilePath, "upload", shockClient, context, true, false)
+		if err != nil {
+			err = fmt.Errorf("(createNormalizedSubmisson) C) ProcessIOData(for upload) returned: %s", err.Error())
+			return
+		}
+		uploadCount += subUploadCount
+
+	}
+
+	logger.Debug(3, "%d files have been uploaded\n", uploadCount)
+
+	var shockRequirement cwl.ShockRequirement
+	var shockRequirementPtr *cwl.ShockRequirement
+	shockRequirementPtr, err = cwl.NewShockRequirement(shockClient.Host)
+	if err != nil {
+		err = fmt.Errorf("(createNormalizedSubmisson) NewShockRequirement returned: %s", err.Error())
 		return
 	}
 
-	shock_requirement = *shock_requirement_ptr
-	// A) search for File objects in Document, e.g. in CommandLineTools
-	// B) inject ShockRequirement into CommandLineTools, ExpressionTools and Workflow
-	for j, _ := range named_object_array {
+	shockRequirement = *shockRequirementPtr
 
-		pair := named_object_array[j]
+	// B) inject ShockRequirement into CommandLineTools, ExpressionTools and Workflow
+	for j := range namedObjectArray {
+
+		pair := namedObjectArray[j]
 		object := pair.Value
 
 		var ok bool
@@ -203,104 +377,111 @@ func main_wrapper() (err error) {
 		case *cwl.Workflow:
 			workflow := object.(*cwl.Workflow)
 
-			workflow.Requirements, err = cwl.AddRequirement(shock_requirement, workflow.Requirements)
+			workflow.Requirements, err = cwl.AddRequirement(&shockRequirement, workflow.Requirements)
 			if err != nil {
-				err = fmt.Errorf("(main_wrapper) AddRequirement returned: %s", err.Error())
+				err = fmt.Errorf("(createNormalizedSubmisson) AddRequirement returned: %s", err.Error())
 				return
 			}
 
 		case *cwl.CommandLineTool:
-			var cmd_line_tool *cwl.CommandLineTool
-			cmd_line_tool, ok = object.(*cwl.CommandLineTool) // TODO this misses embedded CommandLineTools !
+			var cmdLineTool *cwl.CommandLineTool
+			cmdLineTool, ok = object.(*cwl.CommandLineTool) // TODO this misses embedded CommandLineTools !
 			if !ok {
 				//fmt.Println("nope.")
 				err = nil
 				continue
 			}
 
-			if cmd_line_tool == nil {
-				err = fmt.Errorf("(main_wrapper) cmd_line_tool==nil")
+			cmdLineTool.Requirements, err = cwl.AddRequirement(&shockRequirement, cmdLineTool.Requirements)
+			if err != nil {
+				err = fmt.Errorf("(createNormalizedSubmisson) AddRequirement returned: %s", err.Error())
+			}
+
+		case *cwl.ExpressionTool:
+			var expressTool *cwl.ExpressionTool
+			expressTool, ok = object.(*cwl.ExpressionTool) // TODO this misses embedded ExpressionTools !
+			if !ok {
+				//fmt.Println("nope.")
+				err = nil
+				continue
+			}
+
+			if expressTool == nil {
+				err = fmt.Errorf("(createNormalizedSubmisson) express_tool==nil")
 				return
 			}
 
-			cmd_line_tool.Requirements, err = cwl.AddRequirement(shock_requirement, cmd_line_tool.Requirements)
+			expressTool.Requirements, err = cwl.AddRequirement(&shockRequirement, expressTool.Requirements)
 			if err != nil {
-				err = fmt.Errorf("(main_wrapper) AddRequirement returned: %s", err.Error())
+				err = fmt.Errorf("(createNormalizedSubmisson) AddRequirement returned: %s", err.Error())
 			}
 
-			update := false
-			for i, _ := range cmd_line_tool.Inputs {
-				command_input_parameter := &cmd_line_tool.Inputs[i]
-				if command_input_parameter.Default == nil {
-					continue
-				}
-
-				var default_file *cwl.File
-				default_file, ok = command_input_parameter.Default.(*cwl.File)
-				if !ok {
-					continue
-				}
-
-				err = cache.UploadFile(default_file, inputfile_path, shock_client)
-				if err != nil {
-					return
-				}
-				command_input_parameter.Default = default_file
-				cmd_line_tool.Inputs[i] = *command_input_parameter
-				update = true
-				//spew.Dump(command_input_parameter)
-				//fmt.Printf("File: %+v\n", *default_file)
-
-			}
-			if update {
-				named_object_array[j].Value = cmd_line_tool
-			}
 		}
 	}
 
 	// create temporary workflow document file
 
-	new_document := cwl.CWL_document_generic{}
-	new_document.CwlVersion = cwl_version
-	for i, _ := range named_object_array {
-		pair := named_object_array[i]
-		object := pair.Value
-		new_document.Graph = append(new_document.Graph, object)
+	newDocument := context.GraphDocument
+
+	//new_document := cwl.GraphDocument{}
+	//new_document.CwlVersion = context.CwlVersion
+	//new_document.Namespaces = namespaces
+	//new_document.Schemas = schemas
+
+	// replace graph
+	newDocument.Graph = []interface{}{}
+	//for i := range namedObjectArray {
+	for i := range context.Objects {
+		//object := cwl.NamedCWLObject{}
+		//pair.Value =
+		object := context.Objects[i]
+		//object := pair.Value
+		newDocument.Graph = append(newDocument.Graph, object)
 	}
 
-	var new_document_bytes []byte
-	new_document_bytes, err = yaml.Marshal(new_document)
+	if len(newDocument.Graph) == 0 {
+		err = fmt.Errorf("(createNormalizedSubmisson) len(new_document.Graph) == 0")
+		return
+	}
+
+	var newDocumentBytes []byte
+	newDocumentBytes, err = yaml.Marshal(newDocument)
 	if err != nil {
-		err = fmt.Errorf("(main_wrapper) yaml.Marshal returned: %s", err.Error())
+		err = fmt.Errorf("(createNormalizedSubmisson) yaml.Marshal returned: %s", err.Error())
 		return
 	}
-	new_document_str := string(new_document_bytes[:])
-	graph_pos := strings.Index(new_document_str, "\ngraph:")
+	newDocumentStr := string(newDocumentBytes[:])
+	//graph_pos := strings.Index(new_document_str, "\ngraph:")
 
-	if graph_pos != -1 {
-		new_document_str = strings.Replace(new_document_str, "\ngraph", "\n$graph", -1) // remove dollar sign
-	} else {
-		err = fmt.Errorf("(main_wrapper) keyword graph not found")
-		return
+	//new_document_str = strings.Replace(new_document_str, "\nnamespaces", "\n$namespaces", -1) // remove dollar sign
+
+	//if graph_pos != -1 {
+	//new_document_str = strings.Replace(new_document_str, "\ngraph", "\n$graph", -1) // remove dollar sign
+	//} else {
+
+	//	err = fmt.Errorf("(main_wrapper) keyword graph not found")
+	//	return
+	//}
+
+	if conf.DEBUG_LEVEL >= 3 {
+		fmt.Println("------------ new_document_str:")
+		fmt.Println(newDocumentStr)
+		fmt.Println("------------")
+		//panic("hhhh")
 	}
+	newDocumentBytes = []byte(newDocumentStr)
 
-	fmt.Println("------------")
-	fmt.Println(new_document_str)
-	fmt.Println("------------")
-	//panic("hhhh")
-	new_document_bytes = []byte(new_document_str)
-
-	// this needs to be a file so we can run "cwltool --pack""
+	// ### Write workflow to file, so we can run "cwltool --pack""
 	var tmpfile *os.File
 	tmpfile, err = ioutil.TempFile(os.TempDir(), "awe-submitter_")
 	if err != nil {
 		err = fmt.Errorf("(main_wrapper) ioutil.TempFile returned: %s", err.Error())
 		return
 	}
-	tempfile_name := tmpfile.Name()
+	workflowTemporaryFile = tmpfile.Name()
 	//defer os.Remove(tempfile_name)
 
-	_, err = tmpfile.Write(new_document_bytes)
+	_, err = tmpfile.Write(newDocumentBytes)
 	if err != nil {
 		err = fmt.Errorf("(main_wrapper) tmpfile.Write returned: %s", err.Error())
 		return
@@ -317,125 +498,170 @@ func main_wrapper() (err error) {
 
 	//var b bytes.Buffer
 	//w := multipart.NewWriter(&b)
-	var jobid string
-	jobid, err = SubmitCWLJobToAWE(tempfile_name, job_file, &data, awe_auth, shock_auth)
+
+	return
+}
+
+// WaitForResults _
+func WaitForResults(jobid string, entrypoint string, aweAuth string, context *cwl.WorkflowContext) (err error) {
+
+	var job *core.Job
+	var statusCode int
+	// ***** Wait for job to complete
+
+FORLOOP:
+	for true {
+		time.Sleep(5 * time.Second)
+		job = nil
+
+		job, statusCode, err = GetAWEJob(jobid, aweAuth)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "(Wait_for_results) GetAWEJob returned: (status_code: %d) error: %s  \n", statusCode, err.Error())
+			if statusCode == -1 {
+				err = nil
+				continue
+			}
+			return
+		}
+
+		//fmt.Printf("job state: %s\n", job.State)
+
+		switch job.State {
+		case core.JOB_STAT_COMPLETED:
+			logger.Debug(1, "(Wait_for_results) job state: %s", core.JOB_STAT_COMPLETED)
+
+			//root = job.Root
+
+			break FORLOOP
+		case core.JOB_STAT_SUSPEND:
+			errorMessageStr := ""
+
+			if job.Error != nil {
+
+				errorMessage, _ := json.Marshal(job.Error)
+				errorMessageStr = string(errorMessage[:])
+			}
+
+			err = fmt.Errorf("(Wait_for_results) job is in state \"%s\" (error: %s)", job.State, errorMessageStr)
+			return
+		case core.JOB_STAT_FAILED_PERMANENT:
+			err = fmt.Errorf("(Wait_for_results) job is in state \"%s\"", job.State)
+			return
+		case core.JOB_STAT_DELETED:
+			err = fmt.Errorf("(Wait_for_results) job is in state \"%s\"", job.State)
+			return
+		}
+	}
+	//spew.Dump(job)
+
+	//_, err = job.Init()
+	//if err != nil {
+	//return
+	//}
+
+	// example: curl http://skyport.local:8001/awe/api/workflow_instances/c1cad21a-5ab5-4015-8aae-1dfda844e559_root
+
+	var wi *core.WorkflowInstance
+	wi, statusCode, err = GetRootWorkflowInstance(job, aweAuth)
+
+	//panic("Implement getting for output")
+	//var wi *core.WorkflowInstance
+	// var ok bool
+	// wi, ok, err = job.GetWorkflowInstance("_root", false)
 	if err != nil {
-		err = fmt.Errorf("(main_wrapper) SubmitCWLJobToAWE returned: %s", err.Error())
+		err = fmt.Errorf("(Wait_for_results) GetWorkflowInstance returned: %s", err.Error())
 		return
 	}
 
-	//fmt.Printf("Job id: %s\n", jobid)
+	// if !ok {
+	// 	err = fmt.Errorf("(Wait_for_results) WorkflowInstance not found")
+	// 	return
+	// }
 
-	if conf.SUBMITTER_WAIT {
-		var job *core.Job
+	//spew.Dump(wi.Outputs)
 
-	FORLOOP:
-		for true {
-			time.Sleep(5 * time.Second)
-			job = nil
+	outputReceipt := map[string]interface{}{}
+	for _, out := range wi.Outputs {
 
-			job, err = GetAWEJob(jobid, awe_auth)
-			if err != nil {
-				return
-			}
+		outID := strings.TrimPrefix(out.ID, job.Entrypoint+"/")
 
-			//fmt.Printf("job state: %s\n", job.State)
+		outputReceipt[outID] = out.Value
+	}
 
-			switch job.State {
-			case core.JOB_STAT_COMPLETED:
-				break FORLOOP
-			case core.JOB_STAT_SUSPEND:
-				err = fmt.Errorf("(main_wrapper) job is in state \"%s\"", job.State)
-				return
-			case core.JOB_STAT_FAILED_PERMANENT:
-				err = fmt.Errorf("(main_wrapper) job is in state \"%s\"", job.State)
-				return
-			case core.JOB_STAT_DELETED:
-				err = fmt.Errorf("(main_wrapper) job is in state \"%s\"", job.State)
-				return
-			}
-		}
-		//spew.Dump(job)
+	if conf.SUBMITTER_DOWNLOAD_FILES { // TODO
+		var outputFilePath string
+		outputFilePath, err = os.Getwd()
 
-		_, err = job.Init()
+		_, err = cache.ProcessIOData(outputReceipt, outputFilePath, outputFilePath, "download", nil, context, true, true)
 		if err != nil {
+			//spew.Dump(outputReceipt)
+			err = fmt.Errorf("(Wait_for_results) ProcessIOData(for download) returned: %s", err.Error())
 			return
 		}
-		var wi *core.WorkflowInstance
-		wi, err = job.GetWorkflowInstance("", false)
+	}
+
+	var outputReceiptBytes []byte
+	outputReceiptBytes, err = json.MarshalIndent(outputReceipt, "", "    ")
+	if err != nil {
 		if err != nil {
-			err = fmt.Errorf("(main_wrapper) GetWorkflowInstance returned: %s", err.Error())
+			err = fmt.Errorf("(Wait_for_results) json.MarshalIndent returned: %s", err.Error())
 			return
 		}
-		//spew.Dump(wi.Outputs)
+	}
+	logger.Debug(3, string(outputReceiptBytes[:]))
 
-		output_receipt := map[string]interface{}{}
-		for _, out := range wi.Outputs {
-
-			out_id := strings.TrimPrefix(out.Id, job.Entrypoint+"/")
-
-			output_receipt[out_id] = out.Value
-		}
-
-		if conf.SUBMITTER_DOWNLOAD_FILES { // TODO
-			var output_file_path string
-			output_file_path, err = os.Getwd()
-
-			_, err = cache.ProcessIOData(output_receipt, output_file_path, "download", nil)
-			if err != nil {
-				spew.Dump(output_receipt)
-				err = fmt.Errorf("(main_wrapper) ProcessIOData(for download) returned: %s", err.Error())
-				return
-			}
-		}
-
-		var output_receipt_bytes []byte
-		output_receipt_bytes, err = json.MarshalIndent(output_receipt, "", "    ")
+	if conf.SUBMITTER_OUTPUT != "" {
+		err = ioutil.WriteFile(conf.SUBMITTER_OUTPUT, outputReceiptBytes, 0644)
 		if err != nil {
-			if err != nil {
-				err = fmt.Errorf("(main_wrapper) json.MarshalIndent returned: %s", err.Error())
-				return
-			}
+			err = fmt.Errorf("(Wait_for_results) ioutil.WriteFile returned: %s", err.Error())
+			return
 		}
-		logger.Debug(3, string(output_receipt_bytes[:]))
-
-		if conf.SUBMITTER_OUTPUT != "" {
-			err = ioutil.WriteFile(conf.SUBMITTER_OUTPUT, output_receipt_bytes, 0644)
-			if err != nil {
-				err = fmt.Errorf("(main_wrapper) ioutil.WriteFile returned: %s", err.Error())
-				return
-			}
-		} else {
-			fmt.Println(string(output_receipt_bytes[:]))
-		}
-
 	} else {
-		fmt.Printf("JobID=%s\n", jobid)
+		fmt.Println(string(outputReceiptBytes[:]))
 	}
 	return
 }
 
-func SubmitCWLJobToAWE(workflow_file string, job_file string, data *[]byte, awe_auth string, shock_auth string) (jobid string, err error) {
-	multipart := NewMultipartWriter()
+// SubmitCWLJobToAWE _
+func SubmitCWLJobToAWE(workflowFile string, jobFile string, entrypoint string, jobData *[]byte, aweAuth string, shockAuth string) (jobid string, newEntrypoint string, err error) {
+	multipart := core.NewMultipartWriter()
 
-	err = multipart.AddFile("cwl", workflow_file)
+	err = multipart.AddFile("cwl", workflowFile)
 	if err != nil {
-		err = fmt.Errorf("(SubmitCWLJobToAWE) multipart.AddFile returned: %s", err.Error())
+		err = fmt.Errorf("(SubmitCWLJobToAWE) multipart.AddFile returned: %s (workflowFile=%s)", err.Error(), workflowFile)
 		return
 	}
 
-	err = multipart.AddDataAsFile("job", job_file, data)
+	if jobFile != "" {
+		logger.Debug(3, "(SubmitCWLJobToAWE) jobFile: %s", jobFile)
+
+		err = multipart.AddDataAsFile("job", jobFile, jobData)
+		if err != nil {
+			err = fmt.Errorf("(SubmitCWLJobToAWE) AddDataAsFile returned: %s", err.Error())
+			return
+		}
+	}
+	//fmt.Fprintf(os.Stderr, "CLIENT_GROUP: %s\n", conf.CLIENT_GROUP)
+	err = multipart.AddForm("CLIENT_GROUP", conf.CLIENT_GROUP)
 	if err != nil {
-		err = fmt.Errorf("(SubmitCWLJobToAWE) AddDataAsFile returned: %s", err.Error())
+		err = fmt.Errorf("(SubmitCWLJobToAWE) AddForm returned: %s", err.Error())
+		return
+	}
+
+	logger.Debug(3, "(SubmitCWLJobToAWE) entrypoint: %s", entrypoint)
+
+	err = multipart.AddForm("entrypoint", entrypoint)
+	if err != nil {
+		err = fmt.Errorf("(SubmitCWLJobToAWE) AddForm returned: %s", err.Error())
 		return
 	}
 
 	header := make(map[string][]string)
-	if awe_auth != "" {
-		header["Authorization"] = []string{awe_auth}
+	if aweAuth != "" {
+		header["Authorization"] = []string{aweAuth}
 	}
-	if shock_auth != "" {
-		header["Datatoken"] = []string{shock_auth}
+	if shockAuth != "" {
+		header["Datatoken"] = []string{shockAuth}
 	}
 
 	response, err := multipart.Send("POST", conf.SERVER_URL+"/job", header)
@@ -466,41 +692,54 @@ func SubmitCWLJobToAWE(workflow_file string, job_file string, data *[]byte, awe_
 		return
 	}
 
-	var job_bytes []byte
-	job_bytes, err = json.Marshal(sr.Data)
+	var jobBytes []byte
+	jobBytes, err = json.Marshal(sr.Data)
 	if err != nil {
 		err = fmt.Errorf("(SubmitCWLJobToAWE) json.Marshal returned: %s", err.Error())
 		return
 	}
 
 	var job core.Job
-	err = json.Unmarshal(job_bytes, &job)
+	err = json.Unmarshal(jobBytes, &job)
 	if err != nil {
-		err = fmt.Errorf("(SubmitCWLJobToAWE) json.Unmarshal returned: %s (%s)", err.Error(), conf.SERVER_URL+"/job")
+		err = fmt.Errorf("(SubmitCWLJobToAWE) json.Unmarshal returned: %s (%s) (job_bytes: %s)", err.Error(), conf.SERVER_URL+"/job", jobBytes)
 		return
 	}
-	jobid = job.Id
+	jobid = job.ID
+
+	newEntrypoint = job.Entrypoint
 
 	return
 
 }
 
-func GetAWEJob(jobid string, awe_auth string) (job *core.Job, err error) {
-
-	multipart := NewMultipartWriter()
-
-	header := make(map[string][]string)
-	if awe_auth != "" {
-		header["Authorization"] = []string{awe_auth}
-	}
-
-	response, err := multipart.Send("GET", conf.SERVER_URL+"/job/"+jobid, header)
-	if err != nil {
+// GetAWEObject _
+func GetAWEObject(resource string, objectid string, aweAuth string, result interface{}) (statusCode int, err error) {
+	statusCode = -1
+	if objectid == "" {
+		err = fmt.Errorf("(GetAWEObject) objectid empty")
 		return
 	}
 
+	multipart := core.NewMultipartWriter()
+
+	header := make(map[string][]string)
+	if aweAuth != "" {
+		header["Authorization"] = []string{aweAuth}
+	}
+
+	getURL := fmt.Sprintf("%s/%s/%s", conf.SERVER_URL, resource, objectid)
+	response, err := multipart.Send("GET", getURL, header)
+	if err != nil {
+		err = fmt.Errorf("(GetAWEObject) multipart.Send returned: %s (url was %s)", err.Error(), getURL)
+		return
+	}
+
+	statusCode = response.StatusCode
+
 	responseData, err := ioutil.ReadAll(response.Body)
 	if err != nil {
+		err = fmt.Errorf("(GetAWEObject) ioutil.ReadAll returned: %s", err.Error())
 		return
 	}
 
@@ -511,110 +750,78 @@ func GetAWEJob(jobid string, awe_auth string) (job *core.Job, err error) {
 	var sr standardResponse
 	err = json.Unmarshal(responseData, &sr)
 	if err != nil {
-		err = fmt.Errorf("(GetAWEJob) json.Unmarshal returned: %s (%s) (response.StatusCode: %d)", err.Error(), conf.SERVER_URL+"/job/"+jobid, response.StatusCode)
+
+		r := strings.NewReplacer("\n", " ", "\r", " ") // remove newlines
+
+		extension := ""
+		prefixlen := 100
+		if len(responseData) < 100 {
+			prefixlen = len(responseData)
+			extension = "..."
+		}
+
+		bodyPrefix := r.Replace(string(responseData[0:prefixlen])) + extension // this helps debugging
+
+		err = fmt.Errorf("(GetAWEObject) json.Unmarshal returned: %s (%s) (response.StatusCode: %d) (body: \"%s\")", err.Error(), getURL, statusCode, bodyPrefix)
 		return
 	}
 
 	if len(sr.Error) > 0 {
-		err = fmt.Errorf("%s", sr.Error[0])
+		err = fmt.Errorf("(GetAWEObject) AWE server returned error: %s (url was: %s)", sr.Error[0], getURL)
 		return
 	}
 
-	if response.StatusCode != 200 {
-		err = fmt.Errorf("(GetAWEJob) response.StatusCode: %d", response.StatusCode)
+	if statusCode != 200 {
+		err = fmt.Errorf("(GetAWEObject) response.StatusCode: %d", statusCode)
 		return
 	}
 
-	var job_bytes []byte
-	job_bytes, err = json.Marshal(sr.Data)
+	var resultBytes []byte
+	resultBytes, err = json.Marshal(sr.Data)
 	if err != nil {
+		err = fmt.Errorf("(GetAWEObject) json.Marshal returned: %s", err.Error())
 		return
 	}
 
 	//var job core.Job
+	//job = &core.Job{}
+	err = json.Unmarshal(resultBytes, result)
+	if err != nil {
+		fmt.Printf("result_bytes: %s\n", resultBytes)
+		err = fmt.Errorf("(GetAWEObject) (second call) json.Unmarshal returned: %s (%s)", err.Error(), getURL)
+		return
+	}
+
+	return
+}
+
+// GetAWEJob _
+func GetAWEJob(jobid string, aweAuth string) (job *core.Job, statusCode int, err error) {
+
 	job = &core.Job{}
-	err = json.Unmarshal(job_bytes, job)
+	statusCode, err = GetAWEObject("job", jobid, aweAuth, job)
 	if err != nil {
-		err = fmt.Errorf("(GetAWEJob) (second call) json.Unmarshal returned: %s (%s)", err.Error(), conf.SERVER_URL+"/job/"+jobid)
-		return
-	}
-
-	return
-}
-
-type MultipartWriter struct {
-	b bytes.Buffer
-	w *multipart.Writer
-}
-
-func NewMultipartWriter() *MultipartWriter {
-	m := &MultipartWriter{}
-	m.w = multipart.NewWriter(&m.b)
-	return m
-}
-
-func (m *MultipartWriter) Send(method string, url string, header map[string][]string) (response *http.Response, err error) {
-	m.w.Close()
-	//fmt.Println("------------")
-	//spew.Dump(m.w)
-	//fmt.Println("------------")
-
-	req, err := http.NewRequest(method, url, &m.b)
-	if err != nil {
-		return
-	}
-	// Don't forget to set the content type, this will contain the boundary.
-	req.Header.Set("Content-Type", m.w.FormDataContentType())
-
-	for key := range header {
-		header_array := header[key]
-		for _, value := range header_array {
-			req.Header.Add(key, value)
-		}
-
-	}
-
-	// Submit the request
-	client := &http.Client{}
-	//fmt.Printf("%s %s\n\n", method, url)
-	response, err = client.Do(req)
-	if err != nil {
-		return
-	}
-
-	// Check the response
-	//if response.StatusCode != http.StatusOK {
-	//	err = fmt.Errorf("bad status: %s", response.Status)
-	//}
-	return
-
-}
-
-func (m *MultipartWriter) AddDataAsFile(fieldname string, filepath string, data *[]byte) (err error) {
-
-	fw, err := m.w.CreateFormFile(fieldname, filepath)
-	if err != nil {
-		return
-	}
-	_, err = fw.Write(*data)
-	if err != nil {
-		return
+		err = fmt.Errorf("(GetAWEJob) GetAWEObject returned: %s", err.Error())
 	}
 	return
 }
 
-func (m *MultipartWriter) AddFile(fieldname string, filepath string) (err error) {
+// GetRootWorkflowInstance _
+func GetRootWorkflowInstance(job *core.Job, aweAuth string) (wi *core.WorkflowInstance, statusCode int, err error) {
+	//wi_array := []core.WorkflowInstance{}
+	var wiIf interface{}
 
-	f, err := os.Open(filepath)
+	queryStr := job.Root
+
+	statusCode, err = GetAWEObject("workflow_instances", queryStr, aweAuth, &wiIf)
 	if err != nil {
+		err = fmt.Errorf("(GetRootWorkflowInstance) GetAWEObject returned: %s (queryStr: %s)", err.Error(), queryStr)
 		return
 	}
-	defer f.Close()
-	fw, err := m.w.CreateFormFile(fieldname, filepath)
+
+	wi, err = core.NewWorkflowInstanceFromInterface(wiIf, job, nil, false)
 	if err != nil {
-		return
-	}
-	if _, err = io.Copy(fw, f); err != nil {
+		err = fmt.Errorf("(GetRootWorkflowInstance) NewWorkflowInstanceFromInterface returned: %s", err.Error())
 		return
 	}
 

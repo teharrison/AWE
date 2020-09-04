@@ -2,9 +2,11 @@ package core
 
 import (
 	"errors"
+	"sort"
+
 	e "github.com/MG-RAST/AWE/lib/errors"
 	"github.com/MG-RAST/AWE/lib/logger"
-	"sort"
+
 	//"sync"
 	"fmt"
 )
@@ -41,7 +43,7 @@ func (wq *WorkQueue) Len() (int, error) {
 }
 
 func (wq *WorkQueue) Add(workunit *Workunit) (err error) {
-	if workunit.Id == "" {
+	if workunit.ID == "" {
 		return errors.New("try to push a workunit with an empty id")
 	}
 
@@ -102,6 +104,7 @@ func (wq *WorkQueue) GetAll() (worklist []*Workunit, err error) {
 	return wq.all.GetWorkunits()
 }
 
+// Clean Remove broken workunits
 func (wq *WorkQueue) Clean() (workunits []*Workunit) {
 	workunt_list, err := wq.all.GetWorkunits()
 	if err != nil {
@@ -115,7 +118,8 @@ func (wq *WorkQueue) Clean() (workunits []*Workunit) {
 			wq.Checkout.Delete(id)
 			wq.Suspend.Delete(id)
 			wq.all.Delete(id)
-			logger.Error("error: in WorkQueue workunit %s is nil, deleted from queue", id)
+			id_str, _ := id.String()
+			logger.Error("error: in WorkQueue workunit %s is nil, deleted from queue", id_str)
 		}
 	}
 	return
